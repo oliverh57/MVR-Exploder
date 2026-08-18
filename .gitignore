@@ -1,0 +1,14 @@
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+DerivedData/
+.build/
+build/
+
+# macOS
+.DS_Store
+
+# Note: Package.resolved (under xcshareddata/swiftpm/) is intentionally
+# NOT ignored — for an app (not a library), committing it pins the exact
+# ZIPFoundation version so every build is reproducible.

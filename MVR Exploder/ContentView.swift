@@ -1,21 +1,22 @@
-//
-//  ContentView.swift
-//  MVR Exploder
-//
-//  Created by Oliver Hynds on 23/07/2026.
-//
-
 import SwiftUI
 
 struct ContentView: View {
+    @State private var mode: AppMode?
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        Group {
+            switch mode {
+            case .none:
+                ModeSelectionView { selected in
+                    mode = selected
+                }
+            case .singleEdit:
+                SingleEditView(onBack: { mode = nil })
+            case .compare:
+                CompareView(onBack: { mode = nil })
+            }
         }
-        .padding()
+        .frame(minWidth: 780, minHeight: 480)
     }
 }
 
