@@ -457,7 +457,7 @@ struct AutoIDView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Group spacing — fixtures further apart than this start a new group")
+                Text("Grouping distance — how far apart fixtures must be to be a separate truss")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -519,7 +519,7 @@ struct AutoIDView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Tolerance — fixtures this close on an axis share a position")
+                Text("Ordering tolerance — how close fixtures must be to count as one position when numbering")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -651,6 +651,14 @@ struct AutoIDView: View {
                         selectedSpecs = [spec]
                     }
                 }
+
+                // Always shown, never enabled: grouping is done to groups,
+                // not to a type, and the item says where to go rather than
+                // leaving the reader to find out that this menu isn't it.
+                Divider()
+                Button("Group fixtures together") {}
+                    .disabled(true)
+                    .help("Select the groups in the middle column, then right-click one of them.")
     }
 
     private func typeRow(_ spec: String) -> some View {
@@ -1070,14 +1078,11 @@ struct AutoIDView: View {
                         .padding(.top, 4)
                 }
 
+                // No Merge button: merging is on the group's own right-click
+                // menu, where the groups being merged are the ones in hand.
+                // A second way in at the top of the column only raised the
+                // question of which one to use.
                 HStack(spacing: 8) {
-                    Button("Merge") {
-                        session.merge(groupIndices: selectedGroups, in: spec)
-                        selectedGroups = []
-                    }
-                    .disabled(selectedGroups.count < 2)
-                    .help("Treat the selected groups as one truss.")
-
                     Spacer()
 
                     Button("Reset grouping") {
@@ -1254,7 +1259,7 @@ struct AutoIDView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Rename, order, flip, spacing, starting ID…")
+            .help("Rename, numbering order, flip, grouping distance, starting ID…")
         }
         .padding(.vertical, 2)
         // A type's list skips the bars it isn't on, which looks like a gap
@@ -1321,19 +1326,32 @@ struct AutoIDView: View {
                 }
             } label: {
                 Label(
-                    indices.count > 1 ? "Order of \(indices.count) groups" : "Order",
+                    indices.count > 1 ? "Numbering order of \(indices.count) groups" : "Numbering order",
                     systemImage: "arrow.triangle.turn.up.right.diamond")
+            }
+
+            // Directly under the order, because it belongs to it: it sets
+            // how close two fixtures must be to be numbered as one
+            // position. Sitting further down the menu, between grouping
+            // actions, it read as another grouping control.
+            if indices.count == 1, let index = indices.first {
+                Button {
+                    selectedGroups = [index]
+                    showTolerance = true
+                } label: {
+                    Label("Ordering tolerance…", systemImage: "ruler")
+                }
             }
             Divider()
         }
 
         if indices.count == 1, let index = indices.first {
-            Button("Group spacing…") {
+            Button("Grouping distance…") {
                 spacingTarget = session.membership(ofGroup: index, in: spec)
             }
             if let key = session.membership(ofGroup: index, in: spec),
                session.groupSpacing(forKey: key) != nil {
-                Button("Use the type's spacing again") {
+                Button("Use the type's grouping distance again") {
                     session.setGroupSpacing(nil, forKey: key)
                 }
             }
@@ -1362,15 +1380,6 @@ struct AutoIDView: View {
                 }
             } label: {
                 Label("Split", systemImage: "scissors")
-            }
-
-            // Next to Order because that is what it governs: how close two
-            // fixtures must be on an axis to be numbered as one position.
-            Button {
-                selectedGroups = [index]
-                showTolerance = true
-            } label: {
-                Label("Tolerance…", systemImage: "ruler")
             }
 
             Divider()

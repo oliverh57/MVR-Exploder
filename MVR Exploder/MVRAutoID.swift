@@ -24,6 +24,16 @@ enum AutoIDOrderStrategy: String, CaseIterable, Identifiable, Hashable {
     case rowsSameDirection
     /// Straight down, ties broken left to right — for vertical ladders.
     case topToBottom
+    /// One column all the way down, then back to the top of the next.
+    ///
+    /// For a tower carrying two or more fixtures at every height: `.topToBottom`
+    /// reads those across before dropping a level, which numbers the tower in
+    /// pairs. This numbers each vertical line in full before starting the next.
+    ///
+    /// Last in the list deliberately — `suggestedStrategy` keeps the first
+    /// strictly-shortest path, and returning to the top of a tower is a long
+    /// way, so adding this can't quietly displace an existing suggestion.
+    case columnsTopToBottom
 
     var id: String { rawValue }
 
@@ -34,6 +44,7 @@ enum AutoIDOrderStrategy: String, CaseIterable, Identifiable, Hashable {
         case .zigZagRows: return "Zig-zag rows"
         case .rowsSameDirection: return "Rows, all the same way"
         case .topToBottom: return "Top to bottom"
+        case .columnsTopToBottom: return "Tower (down each column)"
         }
     }
 
@@ -44,6 +55,7 @@ enum AutoIDOrderStrategy: String, CaseIterable, Identifiable, Hashable {
         case .zigZagRows: return "Row by row, alternating direction each row."
         case .rowsSameDirection: return "Across, then back to the same side and across again."
         case .topToBottom: return "Down the group, left to right at each height."
+        case .columnsTopToBottom: return "For a tower carrying more than one fixture at each height: all the way down one column, then down the next."
         }
     }
 }
@@ -1496,6 +1508,7 @@ enum MVRAutoID {
         case .zigZagRows: return orderRows(cluster, tolerance: tolerance, alternating: true)
         case .rowsSameDirection: return orderRows(cluster, tolerance: tolerance, alternating: false)
         case .aroundShape: return orderAroundShape(cluster, tolerance: tolerance)
+        case .columnsTopToBottom: return orderColumns(cluster, tolerance: tolerance)
         }
     }
 
@@ -1572,17 +1585,44 @@ enum MVRAutoID {
     /// Rows banded across the group's secondary axis, each row read along
     /// X. `alternating` is the difference between a zig-zag and a carriage
     /// return: with it off, every row starts from the same side.
-    private static func orderRows(
-        _ cluster: [Placed],
-        tolerance: AutoIDTolerance,
-        alternating: Bool
-    ) -> [Placed] {
+    /// Each vertical line in full, top to bottom, then the next line.
+    ///
+    /// The transpose of `orderRows`, and it reuses the same row banding so
+    /// the two cannot disagree about what a row is. Columns fall out of the
+    /// rows: the first fixture of every row is column one, the second of
+    /// every row is column two.
+    ///
+    /// Deriving columns from the rows rather than from horizontal position
+    /// is what makes this work on a real tower. Banding horizontally needs
+    /// a distance to call "the same column", and the only one available is
+    /// the ordering tolerance — 0.2 m by default, which is about the
+    /// spacing of the pair itself. A tower 0.2 m wide then reads as one
+    /// column and numbers straight back down in pairs, which is the thing
+    /// this mode exists to avoid. Two fixtures at the same height cannot be
+    /// in one column, and that needs no distance at all.
+    private static func orderColumns(_ cluster: [Placed], tolerance: AutoIDTolerance) -> [Placed] {
         guard cluster.count > 1 else { return cluster }
 
+        let rows = rowBands(cluster, tolerance: tolerance)
+        let widest = rows.map(\.count).max() ?? 0
+
+        // A row short of fixtures simply has no entry in the later columns
+        // — a tower missing one of a pair keeps the rest in line rather
+        // than shunting everything below it across.
+        return (0..<widest).flatMap { index in
+            rows.compactMap { $0.indices.contains(index) ? $0[index] : nil }
+        }
+    }
+
+    /// The group split into rows and each row sorted across the stage.
+    ///
+    /// Rows run top-down when the group is hung and front-to-back when it
+    /// is on the floor, which is the same question `usesDepthAsSecondaryAxis`
+    /// answers for the other strategies.
+    private static func rowBands(_ cluster: [Placed], tolerance: AutoIDTolerance) -> [[Placed]] {
         let byDepth = usesDepthAsSecondaryAxis(cluster)
         let axis: (Placed) -> Double = byDepth ? { $0.point.y } : { $0.point.z }
         let band = max(byDepth ? tolerance.y : tolerance.z, 0.01)
-        // Rows run front-to-back on the floor, top-down when hung.
         let ordered = cluster.sorted { byDepth ? axis($0) < axis($1) : axis($0) > axis($1) }
 
         var rows: [[Placed]] = []
@@ -1593,11 +1633,28 @@ enum MVRAutoID {
                 rows.append([placed])
             }
         }
+        return rows.map { $0.sorted(by: acrossThenDeep) }
+    }
 
-        return rows.enumerated().flatMap { index, row -> [Placed] in
-            let sorted = row.sorted { $0.point.x < $1.point.x }
-            guard alternating else { return sorted }
-            return index.isMultiple(of: 2) ? sorted : sorted.reversed()
+    /// Across the stage, then upstage, then down — with a tie broken by
+    /// what the file says, never by the per-load `fixture.id`.
+    private static func acrossThenDeep(_ first: Placed, _ second: Placed) -> Bool {
+        if first.point.x != second.point.x { return first.point.x < second.point.x }
+        if first.point.y != second.point.y { return first.point.y < second.point.y }
+        if first.point.z != second.point.z { return first.point.z > second.point.z }
+        return fileOrder(first, second)
+    }
+
+    private static func orderRows(
+        _ cluster: [Placed],
+        tolerance: AutoIDTolerance,
+        alternating: Bool
+    ) -> [Placed] {
+        guard cluster.count > 1 else { return cluster }
+
+        return rowBands(cluster, tolerance: tolerance).enumerated().flatMap { index, row -> [Placed] in
+            guard alternating else { return row }
+            return index.isMultiple(of: 2) ? row : row.reversed()
         }
     }
 
