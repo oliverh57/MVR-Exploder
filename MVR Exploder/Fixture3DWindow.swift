@@ -11,16 +11,41 @@ import Combine
 @MainActor
 final class Fixture3DWindowPresenter: NSObject, ObservableObject, NSWindowDelegate {
     private var window: NSWindow?
+    /// The editor window this was opened from, so revealing a clicked
+    /// fixture can bring the table back into view.
+    private weak var editorWindow: NSWindow?
 
-    func present(fixtures: [MVRFixture], document: MVRDocument, fileName: String) {
+    func present(
+        fixtures: [MVRFixture],
+        document: MVRDocument,
+        fileName: String,
+        autoIDGroups: [AutoIDGroupOverlay]? = nil,
+        onSelectFixture: @escaping (String) -> Void
+    ) {
         // Rebuilt each time so the view always reflects the current
         // fixtures, matching how the sheet used to behave.
         close()
 
+        // Captured before the 3D window exists, while the editor is still
+        // the key window.
+        editorWindow = NSApp.keyWindow
+
         let controller = NSHostingController(
-            rootView: Fixture3DView(fixtures: fixtures, document: document) { [weak self] in
-                self?.close()
-            }
+            rootView: Fixture3DView(
+                fixtures: fixtures,
+                document: document,
+                autoIDGroups: autoIDGroups,
+                onClose: { [weak self] in self?.close() },
+                onSelectFixture: { [weak self] fixtureID in
+                    // The 3D view opens in front of the editor, so scrolling
+                    // the table without surfacing it looks like the click did
+                    // nothing at all. Ordered front rather than made key, so
+                    // the 3D view keeps focus and stays ready for the next
+                    // click.
+                    self?.editorWindow?.orderFront(nil)
+                    onSelectFixture(fixtureID)
+                }
+            )
         )
 
         let window = NSWindow(contentViewController: controller)

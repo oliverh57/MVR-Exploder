@@ -75,13 +75,34 @@ enum MVRExporter {
         // be in the archive — generating dummy placeholders as needed. This
         // also rewrites each affected fixture's <GDTFSpec> to point at the
         // generated dummy, and mutates exportXML in place.
-        let dummyGDTFs = try resolveGDTFReferences(
+        let (dummyGDTFs, renamedSpecs) = try resolveGDTFReferences(
             in: exportXML,
             sourceArchive: sourceArchive,
             injectedFileNames: Set(document.injectedGDTFFiles.keys.map { $0.lowercased() }),
             workDir: workDir,
             replaceAll: options.replaceAllWithDummyGDTFs
         )
+
+        // Group names go to <UserData>, keyed by each fixture's current
+        // uuid. Deliberately not layers or classes: a console imports those
+        // as patch structure, and the point of these is to travel with the
+        // file without changing what anything else sees.
+        //
+        // After the GDTF pass, not before: that pass can rename a spec, and
+        // the session has to be written with the names the file will
+        // actually carry or its per-type settings match nothing on re-open.
+        var names: [String: String] = [:]
+        var uuidForID: [String: String] = [:]
+        for fixture in document.fixtures {
+            uuidForID[fixture.id] = fixture.currentUUID
+            if let name = document.groupNames[fixture.id] { names[fixture.currentUUID] = name }
+        }
+        // The Auto ID session rides along too, so re-opening this file
+        // resumes the run rather than starting it again.
+        let session = document.autoIDSession?
+            .mappingKeys { uuidForID[$0] }
+            .mappingSpecs { renamedSpecs[$0] ?? $0 }
+        MVRUserData.write(names: names, session: session, in: exportXML)
 
         // 1. Write the (now fully resolved) scene description.
         let xmlData = exportXML.xmlData(options: .nodePrettyPrint)
@@ -141,7 +162,7 @@ enum MVRExporter {
         injectedFileNames: Set<String>,
         workDir: URL,
         replaceAll: Bool
-    ) throws -> [(fileName: String, fileURL: URL)] {
+    ) throws -> (files: [(fileName: String, fileURL: URL)], renamedSpecs: [String: String]) {
         let existingGDTFFilenames = Set(
             sourceArchive.compactMap { entry -> String? in
                 guard entry.path.lowercased().hasSuffix(".gdtf") else { return nil }
@@ -151,6 +172,9 @@ enum MVRExporter {
 
         var dummiesByBaseName: [String: (fileName: String, fileURL: URL)] = [:]
         var usedFileNames = Set<String>()
+        /// What each original spec ended up being called, for callers that
+        /// stored anything against the old name.
+        var renamedSpecs: [String: String] = [:]
         let fixtureNodes = (try? document.nodes(forXPath: "//Fixture")) ?? []
 
         for case let fixture as XMLElement in fixtureNodes {
@@ -173,6 +197,7 @@ enum MVRExporter {
 
             if let existing = dummiesByBaseName[dedupeKey] {
                 specElement.stringValue = existing.fileName
+                renamedSpecs[rawSpec] = existing.fileName
                 setGDTFModeToDummyDefault(on: fixture)
                 continue
             }
@@ -202,10 +227,11 @@ enum MVRExporter {
             let dummyFileURL = try generateDummyGDTF(specName: sanitizedDisplayName, workDir: workDir)
             dummiesByBaseName[dedupeKey] = (dummyFileName, dummyFileURL)
             specElement.stringValue = dummyFileName
+            renamedSpecs[rawSpec] = dummyFileName
             setGDTFModeToDummyDefault(on: fixture)
         }
 
-        return Array(dummiesByBaseName.values)
+        return (Array(dummiesByBaseName.values), renamedSpecs)
     }
 
     /// Dummy GDTFs only ever define one DMXMode (see generateDummyGDTF).
@@ -249,17 +275,40 @@ enum MVRExporter {
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    /// Builds a minimal, structurally-valid GDTF package (itself a zip
-    /// containing a description.xml) as a placeholder for a fixture type
-    /// whose real GDTF isn't available. This is a best-effort skeleton —
-    /// one DMX mode with a single no-op channel — not a spec-perfect GDTF.
-    private static func generateDummyGDTF(specName: String, workDir: URL) throws -> URL {
-        let scratchDir = workDir.appendingPathComponent("gdtf-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
-
+    /// The description.xml for a placeholder fixture type.
+    ///
+    /// **GDTF model dimensions are metres.** The first version of this
+    /// declared a 100 x 100 x 100 cube meaning millimetres, which loaded
+    /// back as a 100-metre box per fixture and buried the plot. For scale,
+    /// a real Varilite VL3600 IP declares a base 0.39m wide and stands
+    /// about 1.13m overall.
+    ///
+    /// Shaped as a base / yoke / head / lens stack rather than one block,
+    /// because a placeholder still has to read as a light at plot scale —
+    /// the silhouette is what tells you a fixture is there and which way
+    /// it faces. Sized as a mid-range moving head: 0.53m tall, 0.32m at its
+    /// widest. The lens sits slightly proud of the head rather than flush
+    /// with it, so the two faces can't z-fight once merged. Geometry hangs *below* the origin exactly as real GDTFs do,
+    /// the origin being the hanging point that MVR's fixture matrix places.
+    ///
+    /// `PrimitiveType` is set properly even though this app renders every
+    /// primitive as a box from the declared dimensions: consoles and
+    /// visualisers that do honour it draw the dummy as a real shape, and it
+    /// costs nothing to be right.
+    static func dummyDescriptionXML(specName: String) -> String {
         let fixtureTypeID = UUID().uuidString.uppercased()
         let escapedName = xmlAttributeEscaped(specName)
-        let descriptionXML = """
+
+        // Nested, so each offset is relative to its parent — the same
+        // arrangement real fixture libraries use.
+        func position(_ drop: Double) -> String {
+            String(format: "{1.000000,0.000000,0.000000,0.000000}"
+                   + "{0.000000,1.000000,0.000000,0.000000}"
+                   + "{0.000000,0.000000,1.000000,%.6f}"
+                   + "{0.000000,0.000000,0.000000,1.000000}", drop)
+        }
+
+        return """
         <?xml version="1.0" encoding="UTF-8"?>
         <GDTF DataVersion="1.2">
           <FixtureType Name="\(escapedName)" ShortName="\(escapedName)" LongName="\(escapedName)" Manufacturer="MVR Exploder" Description="Placeholder GDTF generated by MVR Exploder — the original file was missing." FixtureTypeID="\(fixtureTypeID)" RefFT="">
@@ -287,15 +336,24 @@ enum MVRExporter {
               <GamutCollect/>
             </PhysicalDescriptions>
             <Models>
-              <Model Name="Body" Length="100" Width="100" Height="100" PrimitiveType="Cube"/>
+              <Model Name="Base" Width="0.300000" Height="0.090000" Length="0.300000" PrimitiveType="Base"/>
+              <Model Name="Yoke" Width="0.320000" Height="0.200000" Length="0.140000" PrimitiveType="Yoke"/>
+              <Model Name="Head" Width="0.240000" Height="0.220000" Length="0.240000" PrimitiveType="Head"/>
+              <Model Name="Lens" Width="0.180000" Height="0.020000" Length="0.180000" PrimitiveType="Cylinder"/>
             </Models>
             <Geometries>
-              <Geometry Name="Geometry" Model="Body"/>
+              <Axis Name="Base" Model="Base" Position="\(position(-0.045))">
+                <Axis Name="Yoke" Model="Yoke" Position="\(position(-0.145))">
+                  <Axis Name="Head" Model="Head" Position="\(position(-0.210))">
+                    <Beam Name="Lamp" Model="Lens" Position="\(position(-0.115))" BeamAngle="25.000000" BeamRadius="0.090000" BeamType="Wash" ColorRenderingIndex="100" ColorTemperature="6000.000000" FieldAngle="25.000000" LampType="Discharge" LuminousFlux="10000.000000" PowerConsumption="500.000000" RectangleRatio="1.777700" ThrowRatio="1.000000"/>
+                  </Axis>
+                </Axis>
+              </Axis>
             </Geometries>
             <DMXModes>
-              <DMXMode Name="\(dummyModeName)" Geometry="Geometry">
+              <DMXMode Name="\(dummyModeName)" Geometry="Base">
                 <DMXChannels>
-                  <DMXChannel DMXBreak="1" Geometry="Geometry" Highlight="None" InitialFunction="Geometry_Dimmer.Dimmer.Dimmer" Offset="1">
+                  <DMXChannel DMXBreak="1" Geometry="Base" Highlight="None" InitialFunction="Base_Dimmer.Dimmer.Dimmer" Offset="1">
                     <LogicalChannel Attribute="Dimmer" DMXChangeTimeLimit="0.000000" Master="None" MibFade="0.000000" Snap="No">
                       <ChannelFunction Attribute="Dimmer" DMXFrom="0/1" Default="0/1" Name="Dimmer" OriginalAttribute="Dimmer" PhysicalFrom="0.000000" PhysicalTo="1.000000" RealAcceleration="0.000000" RealFade="0.000000">
                         <ChannelSet DMXFrom="0/1" Name="Closed" WheelSlotIndex="0"/>
@@ -314,6 +372,17 @@ enum MVRExporter {
           </FixtureType>
         </GDTF>
         """
+    }
+
+    /// Builds a minimal, structurally-valid GDTF package (itself a zip
+    /// containing a description.xml) as a placeholder for a fixture type
+    /// whose real GDTF isn't available. This is a best-effort skeleton —
+    /// one DMX mode with a single no-op channel — not a spec-perfect GDTF.
+    private static func generateDummyGDTF(specName: String, workDir: URL) throws -> URL {
+        let scratchDir = workDir.appendingPathComponent("gdtf-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
+
+        let descriptionXML = dummyDescriptionXML(specName: specName)
 
         let descriptionURL = scratchDir.appendingPathComponent("description.xml")
         try descriptionXML.write(to: descriptionURL, atomically: true, encoding: .utf8)
@@ -358,6 +427,19 @@ enum MVRExporter {
         let childListItems = ((try? document.nodes(forXPath: "//Layers//ChildList/*")) ?? [])
             .compactMap { $0 as? XMLElement }
         for element in childListItems where element.name != "Fixture" {
+            // A <SceneObject> is not always geometry: MVR also uses it as a
+            // *container*, with its own <ChildList> of fixtures inside.
+            // Detaching it outright took every fixture in the file with it
+            // on rigs built that way — 328 of 328 on one real file — so a
+            // container is kept and only the geometry it carries itself is
+            // dropped. Nested objects deeper down are separate entries in
+            // this same list and get the same treatment.
+            guard ((try? element.nodes(forXPath: ".//Fixture")) ?? []).isEmpty else {
+                for geometries in element.elements(forName: "Geometries") {
+                    geometries.detach()
+                }
+                continue
+            }
             element.detach()
         }
     }

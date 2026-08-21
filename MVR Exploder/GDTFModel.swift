@@ -183,7 +183,15 @@ struct GDTFModelInfo {
 struct GDTFAssembly {
     let roots: [GDTFGeometryNode]
     let models: [String: GDTFModelInfo]
+    /// Legacy `.3ds` models. These are **unit-normalised** — real size comes
+    /// from the `<Model>` Width/Length/Height attributes.
     let meshes: [String: GDTF3DSParser.RawMesh]
+    /// glTF models, already flattened to one geometry each. Unlike `.3ds`
+    /// these arrive at **real-world size in metres, Y up** (measured: the
+    /// Ayrton Veloce's base glb is 0.115m tall against a declared Height of
+    /// 0.115), i.e. already the app's scene convention, so they're used
+    /// as-is with no normalise-and-rescale step.
+    let gltfMeshes: [String: SCNGeometry]
 }
 
 enum GDTFAssemblyParser {
@@ -225,19 +233,49 @@ enum GDTFAssemblyParser {
         let roots = ((geometriesRoot.children ?? []).compactMap { $0 as? XMLElement }).map(parseNode)
         guard !roots.isEmpty else { return nil }
 
+        // A GDTF's <Model File="…"> carries no extension, because the same
+        // model may ship in several formats. Plenty of current fixture
+        // libraries ship **only** glTF — of 16 real fixture types checked,
+        // 5 had no `models/3ds/` at all (Ayrton Veloce, Robe iForte LTX FS
+        // and others) — and looking for `.3ds` alone silently dropped them
+        // to crude box placeholders. `gltf_high` is the last resort rather
+        // than the first: it's the same model at several times the triangle
+        // count, which is wasted on a plot-checking view.
         var meshes: [String: GDTF3DSParser.RawMesh] = [:]
+        var gltfMeshes: [String: SCNGeometry] = [:]
+
+        func entry(atPath path: String) -> Entry? {
+            archive.first { $0.path.lowercased() == path.lowercased() }
+        }
+
+        func bytes(of entry: Entry) -> Data {
+            var result = Data()
+            _ = try? archive.extract(entry) { result.append($0) }
+            return result
+        }
+
         for info in models.values {
-            guard let file = info.meshFileName, meshes[file] == nil else { continue }
-            let candidatePath = "models/3ds/\(file).3ds"
-            guard let entry = archive.first(where: { $0.path.lowercased() == candidatePath.lowercased() }) else { continue }
-            var meshData = Data()
-            _ = try? archive.extract(entry) { meshData.append($0) }
-            if let mesh = GDTF3DSParser.parse(meshData) {
+            guard let file = info.meshFileName else { continue }
+            guard meshes[file] == nil, gltfMeshes[file] == nil else { continue }
+
+            if let found = entry(atPath: "models/3ds/\(file).3ds"),
+               let mesh = GDTF3DSParser.parse(bytes(of: found)) {
                 meshes[file] = mesh
+                continue
+            }
+
+            for folder in ["gltf", "gltf_high"] {
+                guard
+                    let found = entry(atPath: "models/\(folder)/\(file).glb"),
+                    let tree = GLBParser.parse(bytes(of: found)),
+                    let geometry = SCNGeometryMerge.merged(tree: tree)
+                else { continue }
+                gltfMeshes[file] = geometry
+                break
             }
         }
 
-        return GDTFAssembly(roots: roots, models: models, meshes: meshes)
+        return GDTFAssembly(roots: roots, models: models, meshes: meshes, gltfMeshes: gltfMeshes)
     }
 
     /// A GDTF `Position` matrix is a row-major 4x4 (16 numbers): each of
@@ -261,12 +299,16 @@ enum GDTFAssemblyParser {
 
 extension GDTFGeometryNode {
     /// Recursively builds the SCNNode tree for this geometry node and its
-    /// children. A node only gets visible geometry when its Model has a
-    /// parseable .3ds mesh; otherwise it falls back to a plain box sized
-    /// from the Model's declared dimensions (still useful for silhouette),
-    /// or contributes no geometry at all (a pure pivot, e.g. many Beam
-    /// nodes) if neither is available.
-    func buildNode(models: [String: GDTFModelInfo], meshes: [String: GDTF3DSParser.RawMesh]) -> SCNNode {
+    /// children. A node gets real geometry when its Model resolves to a
+    /// parseable mesh — `.3ds` or glTF; otherwise it falls back to a plain
+    /// box sized from the Model's declared dimensions (still useful for
+    /// silhouette), or contributes no geometry at all (a pure pivot, e.g.
+    /// many Beam nodes) if neither is available.
+    func buildNode(
+        models: [String: GDTFModelInfo],
+        meshes: [String: GDTF3DSParser.RawMesh],
+        gltfMeshes: [String: SCNGeometry] = [:]
+    ) -> SCNNode {
         let node = SCNNode()
         node.position = localOffset
 
@@ -285,15 +327,48 @@ extension GDTFGeometryNode {
                let geometry = mesh.buildGeometry(width: info.width, length: info.length, height: info.height) {
                 geometry.materials = [material]
                 node.geometry = geometry
+            } else if let file = info.meshFileName, let shared = gltfMeshes[file] {
+                // Copied because one model is often referenced by several
+                // geometry nodes in the same fixture, each needing its own
+                // material.
+                let geometry = shared.copy() as! SCNGeometry
+                geometry.materials = [material]
+                node.geometry = geometry
+
+                // glTF fixture models are Y up like the scene, but their
+                // *units* can't be trusted: measured across real libraries,
+                // Ayrton's ship in metres while Robe's ship in millimetres
+                // (its base glb measures 475 against a declared 0.475), which
+                // rendered a moving head 475 metres wide. Rather than guess
+                // per vendor, the mesh is scaled uniformly so its longest
+                // side matches the longest dimension the <Model> declares.
+                // Uniform keeps the mesh's own proportions (unlike the
+                // per-axis fit the `.3ds` path does, which relies on knowing
+                // which mesh axis is width vs length) and self-corrects
+                // whatever unit the file happens to use.
+                let (low, high) = shared.boundingBox
+                let extent = max(high.x - low.x, max(high.y - low.y, high.z - low.z))
+                let declared = CGFloat(max(info.width, max(info.length, info.height)))
+                if extent > 0, declared > 0 {
+                    let scale = declared / extent
+                    node.scale = SCNVector3(scale, scale, scale)
+                }
             } else if info.width > 0, info.height > 0, info.length > 0 {
-                let box = SCNBox(width: CGFloat(info.width), height: CGFloat(info.height), length: CGFloat(info.length), chamferRadius: 0)
+                // Explicitly built rather than SCNBox: this geometry gets
+                // merged into the fixture's single mesh, and SCNBox's vertex
+                // buffer is unit-sized regardless of the dimensions asked
+                // for, so merging one produced a 1-metre cube.
+                let box = SCNGeometryMerge.boxGeometry(
+                    width: CGFloat(info.width),
+                    height: CGFloat(info.height),
+                    length: CGFloat(info.length))
                 box.materials = [material]
                 node.geometry = box
             }
         }
 
         for child in children {
-            node.addChildNode(child.buildNode(models: models, meshes: meshes))
+            node.addChildNode(child.buildNode(models: models, meshes: meshes, gltfMeshes: gltfMeshes))
         }
         return node
     }

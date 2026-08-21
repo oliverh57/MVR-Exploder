@@ -4,17 +4,35 @@ import AppKit
 import ZIPFoundation
 import UniformTypeIdentifiers
 
-private enum ViewPreset: String, CaseIterable, Identifiable {
-    case perspectiveFront = "Perspective Front"
-    case perspectiveTop = "Perspective Top"
-    case orthoFront = "Ortho Front"
-    case orthoBack = "Ortho Back"
-    case orthoLeft = "Ortho Left"
-    case orthoRight = "Ortho Right"
-    case orthoTop = "Ortho Top"
-    case orthoBottom = "Ortho Bottom"
+/// A camera-facing direction, independent of projection mode — Perspective
+/// vs. Orthographic is a separate toggle, so any direction can be viewed in
+/// either projection rather than needing one preset per combination.
+private enum CameraDirection: String, CaseIterable, Identifiable {
+    case front = "Front"
+    case back = "Back"
+    case left = "Left"
+    case right = "Right"
+    case top = "Top"
+    case bottom = "Bottom"
 
     var id: String { rawValue }
+
+    var yaw: CGFloat {
+        switch self {
+        case .front, .top, .bottom: return 0
+        case .back: return .pi
+        case .left: return -.pi / 2
+        case .right: return .pi / 2
+        }
+    }
+
+    var pitch: CGFloat {
+        switch self {
+        case .front, .back, .left, .right: return 0
+        case .top: return .pi / 2
+        case .bottom: return -.pi / 2
+        }
+    }
 }
 
 /// SCNView subclass owning all mouse interaction itself: hover tracking
@@ -120,7 +138,10 @@ private final class HoverTrackingSCNView: SCNView {
     }
 
     override func magnify(with event: NSEvent) {
-        onZoom?(-event.magnification * 200, convert(event.locationInWindow, from: nil))
+        // Scaled down from the wheel's units to suit the exponential zoom
+        // rate in handleZoom — a pinch reports magnification in fractions,
+        // where a scroll reports whole units.
+        onZoom?(-event.magnification * 60, convert(event.locationInWindow, from: nil))
     }
 }
 
@@ -136,8 +157,12 @@ private struct SceneKitContainerView: NSViewRepresentable {
     let onOrbitDrag: (CGFloat, CGFloat) -> Void
     let onPanDrag: (CGFloat, CGFloat) -> Void
     let onZoom: (CGFloat, CGPoint) -> Void
-    /// Reports a click as the id of the scene object hit, or nil for empty space.
-    let onClickGeometry: (String?) -> Void
+    /// Reports a click as both what it hit: the fixture (picked exactly as
+    /// hover does, so clicking matches what the hover card was showing) and
+    /// the scene object, either of which may be nil. Both are reported
+    /// rather than resolved here because which one wins depends on whether
+    /// export-selection mode is on, which this view doesn't know about.
+    let onClick: (_ fixtureID: String?, _ objectID: String?) -> Void
 
     func makeNSView(context: Context) -> SCNView {
         let view = HoverTrackingSCNView()
@@ -167,7 +192,9 @@ private struct SceneKitContainerView: NSViewRepresentable {
         view.onZoom = onZoom
         view.onClick = { [weak view] point in
             guard let view else { return }
-            onClickGeometry(Self.sceneObjectID(at: point, in: view))
+            onClick(
+                Self.fixtureID(at: point, in: view, markersRoot: markersRoot, markerNodes: markerNodes),
+                Self.sceneObjectID(at: point, in: view))
         }
 
         DispatchQueue.main.async {
@@ -262,21 +289,28 @@ private struct SceneKitContainerView: NSViewRepresentable {
     }
 }
 
-/// A simple orbit-able 3D view of every fixture's position, color-coded by
-/// GDTF type (same scheme as the Fixture ID Map). Fixtures are drawn as
-/// plain colored markers, not their real GDTF geometry — this is a spatial
-/// sanity-check tool, not a render preview.
+/// An orbit-able 3D view of the show: every fixture in place, drawn as its
+/// real GDTF geometry (or as plain colour-coded marker spheres, toggleable),
+/// plus the MVR's own set geometry. Colour coding by GDTF type matches the
+/// Fixture ID Map.
 struct Fixture3DView: View {
     let fixtures: [MVRFixture]
     let onClose: () -> Void
+    /// Reports a clicked fixture by its `MVRFixture.id`, so the editor can
+    /// reveal it in the table.
+    let onSelectFixture: (String) -> Void
+    /// Proposed Auto ID grouping to draw over the rig — fixtures take their
+    /// group's colour, and each group gets a box and a numbering path. Nil
+    /// leaves the normal fixture-type legend colouring alone.
+    let autoIDGroups: [AutoIDGroupOverlay]?
 
     /// Source file, kept so scene geometry can be loaded from it on a
     /// background task rather than during init.
     private let mvrURL: URL?
 
-    private var suggestedOBJFileName: String {
+    private func suggestedFileName(for format: MVRGeometryExport.Format) -> String {
         let base = mvrURL.map { $0.deletingPathExtension().lastPathComponent } ?? "Scene Geometry"
-        return "\(base) Geometry.obj"
+        return "\(base) Geometry.\(format.fileExtension)"
     }
 
     private let sortedSpecs: [String]
@@ -288,6 +322,7 @@ struct Fixture3DView: View {
     private let scene: SCNScene
     private let cameraNode: SCNNode
     private let markersNode: SCNNode
+    private let floorNode: SCNNode
     private let sceneCenter: SCNVector3
     private let sceneRadius: CGFloat
 
@@ -305,6 +340,11 @@ struct Fixture3DView: View {
     @State private var orbitDistance: CGFloat
     @State private var orbitTarget: SCNVector3
     @State private var isOrthographic = false
+    @State private var showCameraViewPopover = false
+
+    /// Real GDTF meshes vs. plain marker spheres. Remembered between
+    /// sessions — it's a working preference, not a per-file one.
+    @AppStorage("showRealFixtureGeometry") private var showRealFixtureGeometry = true
 
     @State private var sceneGeometryNode: SCNNode?
     @State private var geometryLayers: [MVRSceneGeometryLoader.SceneGeometryLayer] = []
@@ -335,9 +375,17 @@ struct Fixture3DView: View {
     @State private var isLoadingGeometry = false
     @State private var hasAttemptedGeometryLoad = false
 
-    init(fixtures: [MVRFixture], document: MVRDocument, onClose: @escaping () -> Void) {
+    init(
+        fixtures: [MVRFixture],
+        document: MVRDocument,
+        autoIDGroups: [AutoIDGroupOverlay]? = nil,
+        onClose: @escaping () -> Void,
+        onSelectFixture: @escaping (String) -> Void
+    ) {
         self.fixtures = fixtures
         self.onClose = onClose
+        self.onSelectFixture = onSelectFixture
+        self.autoIDGroups = autoIDGroups
         self.mvrURL = document.originalFileURL
 
         let specs = Set(fixtures.map(\.gdtfSpec)).sorted()
@@ -348,10 +396,16 @@ struct Fixture3DView: View {
         }
         self.specColorIndex = indexMap
 
-        let built = Self.buildScene(fixtures: fixtures, specColorIndex: indexMap, specCount: specs.count, document: document)
+        let built = Self.buildScene(
+            fixtures: fixtures,
+            specColorIndex: indexMap,
+            specCount: specs.count,
+            document: document,
+            autoIDGroups: autoIDGroups)
         self.scene = built.scene
         self.cameraNode = built.cameraNode
         self.markersNode = built.markersNode
+        self.floorNode = built.floorNode
         self.sceneCenter = built.center
         self.sceneRadius = built.radius
         self.positionedCount = built.positionedCount
@@ -372,8 +426,6 @@ struct Fixture3DView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            presetBar
-            Divider()
             HStack(spacing: 0) {
                 sceneArea
                 Divider()
@@ -383,16 +435,90 @@ struct Fixture3DView: View {
             legend
         }
         // Flexible rather than fixed so the hosting window can be resized
-        // and zoomed; the minimum keeps the preset bar and explorer usable.
+        // and zoomed; the minimum keeps the header controls and explorer
+        // usable.
         .frame(minWidth: 820, minHeight: 520)
+        .onAppear { applyFixtureRepresentation() }
         .task { await loadSceneGeometryIfNeeded() }
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text("3D View")
                 .font(.headline)
+
+            Divider().frame(height: 20)
+
+            Picker("Projection", selection: $isOrthographic) {
+                Text("Perspective").tag(false)
+                Text("Orthographic").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
+            // A subtle color difference between the two modes, beyond just
+            // the segmented control's own selected-pill highlight.
+            .tint(isOrthographic ? .orange : .blue)
+            .onChange(of: isOrthographic) { _, _ in
+                // Switches projection in place — direction and distance are
+                // untouched, only how the camera projects them changes.
+                SCNTransaction.begin()
+                SCNTransaction.animationDuration = 0.25
+                applyCameraTransform()
+                SCNTransaction.commit()
+            }
+
+            Picker("Fixtures", selection: $showRealFixtureGeometry) {
+                Text("Real").tag(true)
+                Text("Bubble").tag(false)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 150)
+            .help("Draw fixtures as their real GDTF geometry, or as plain marker spheres.")
+            .onChange(of: showRealFixtureGeometry) { _, _ in
+                applyFixtureRepresentation()
+            }
+
+            Button {
+                showCameraViewPopover = true
+            } label: {
+                Label("Camera View", systemImage: "video")
+            }
+            .buttonStyle(.bordered)
+            .popover(isPresented: $showCameraViewPopover, arrowEdge: .bottom) {
+                cameraViewPopover
+            }
+
+            Button("Fit All") { fitAll() }
+                .buttonStyle(.bordered)
+
+            if !isAutoIDPreview {
+                Divider().frame(height: 20)
+
+                Button {
+                    isSelectingForExport.toggle()
+                    // Selecting is impossible with the geometry hidden —
+                    // clicks can't hit it — so turn it back on rather than
+                    // leaving the mode looking broken.
+                    if isSelectingForExport && !showSceneGeometry {
+                        showSceneGeometry = true
+                        applyLayerVisibility()
+                    }
+                } label: {
+                    Label("Select Geometry for Export", systemImage: isSelectingForExport ? "cube.fill" : "cube")
+                }
+                .buttonStyle(.bordered)
+                .tint(isSelectingForExport ? .accentColor : nil)
+                .disabled(sceneGeometryNode == nil)
+                .help(sceneGeometryNode == nil
+                      ? "This MVR has no scene geometry to export."
+                      : "Click objects in the view, or whole layers in the scene explorer, to mark them for export.")
+                .fixedSize()
+            }
+
             Spacer()
+
             if isLoadingGeometry {
                 ProgressView()
                     .controlSize(.small)
@@ -403,51 +529,38 @@ struct Fixture3DView: View {
                 .foregroundStyle(.secondary)
             Button("Close", action: onClose)
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
-    private var presetBar: some View {
-        HStack(spacing: 8) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 8) {
-                    ForEach(ViewPreset.allCases) { preset in
-                        Button(preset.rawValue) {
-                            moveCamera(to: preset)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Button("Fit All") { fitAll() }
-                        .buttonStyle(.bordered)
-                }
-                .padding(.vertical, 8)
+    /// A view-cube-style 3x2 grid so opposite faces (Front/Back,
+    /// Left/Right, Top/Bottom) line up as pairs, in whichever projection
+    /// mode is currently selected.
+    private var cameraViewPopover: some View {
+        Grid(horizontalSpacing: 6, verticalSpacing: 6) {
+            GridRow {
+                cameraViewButton(.front)
+                cameraViewButton(.back)
             }
-            // The bar only overflows in a narrow window; the scroller bar
-            // sitting under the buttons full-time was just visual noise.
-            .scrollIndicators(.hidden)
-
-            Divider().frame(height: 20)
-
-            Button {
-                isSelectingForExport.toggle()
-                // Selecting is impossible with the geometry hidden — clicks
-                // can't hit it — so turn it back on rather than leaving the
-                // mode looking broken.
-                if isSelectingForExport && !showSceneGeometry {
-                    showSceneGeometry = true
-                    applyLayerVisibility()
-                }
-            } label: {
-                Label("Select Geometry for Export", systemImage: isSelectingForExport ? "cube.fill" : "cube")
+            GridRow {
+                cameraViewButton(.left)
+                cameraViewButton(.right)
             }
-            .buttonStyle(.bordered)
-            .tint(isSelectingForExport ? .accentColor : nil)
-            .disabled(sceneGeometryNode == nil)
-            .help(sceneGeometryNode == nil
-                  ? "This MVR has no scene geometry to export."
-                  : "Click objects in the view, or whole layers in the scene explorer, to mark them for export.")
-            .fixedSize()
+            GridRow {
+                cameraViewButton(.top)
+                cameraViewButton(.bottom)
+            }
         }
-        .padding(.horizontal, 12)
+        .padding(10)
+    }
+
+    private func cameraViewButton(_ direction: CameraDirection) -> some View {
+        Button(direction.rawValue) {
+            moveCamera(to: direction)
+            showCameraViewPopover = false
+        }
+        .buttonStyle(.bordered)
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Scene explorer
@@ -642,12 +755,24 @@ struct Fixture3DView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button {
-                exportSelectionAsOBJ()
+            // A menu rather than one button per format: the choice is
+            // which file to write, not three different actions, and three
+            // buttons in a narrow sidebar would crowd out the selection
+            // count above them.
+            Menu {
+                ForEach(MVRGeometryExport.Format.allCases) { format in
+                    Button {
+                        exportSelection(as: format)
+                    } label: {
+                        Text("\(format.label) (.\(format.fileExtension))")
+                    }
+                    .help(format.detail)
+                }
             } label: {
-                Label("Export OBJ…", systemImage: "square.and.arrow.up")
+                Label("Export…", systemImage: "square.and.arrow.up")
                     .frame(maxWidth: .infinity)
             }
+            .menuStyle(.button)
             .buttonStyle(.borderedProminent)
             .disabled(selectedObjectIDs.isEmpty)
 
@@ -664,29 +789,32 @@ struct Fixture3DView: View {
 
     /// Asks for a destination, then writes the selected objects out. The
     /// selection is exported in the order the objects appear in the file so
-    /// the OBJ's groups line up with the MVR's own ordering.
-    private func exportSelectionAsOBJ() {
+    /// the exported groups line up with the MVR's own ordering.
+    private func exportSelection(as format: MVRGeometryExport.Format) {
         let items = objectExportOrder
             .filter { selectedObjectIDs.contains($0.id) }
-            .compactMap { entry -> MVROBJExporter.ExportItem? in
+            .compactMap { entry -> MVRGeometryExport.ExportItem? in
                 guard let node = geometryObjectNodes[entry.id] else { return nil }
-                return MVROBJExporter.ExportItem(node: node, name: entry.name)
+                return MVRGeometryExport.ExportItem(node: node, name: entry.name)
             }
         guard !items.isEmpty else { return }
 
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "obj")].compactMap { $0 }
-        panel.nameFieldStringValue = suggestedOBJFileName
+        panel.prepareForExport(
+            named: suggestedFileName(for: format), fileExtension: format.fileExtension)
         panel.canCreateDirectories = true
         panel.title = "Export Selected Geometry"
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let summary = try MVROBJExporter.export(items: items, to: url)
+            // macOS has no registered type for .dxf, so the panel won't
+            // append one — the file would land extensionless.
+            let summary = try MVRGeometryExport.export(
+                items: items, as: format, to: url.ensuringPathExtension(format.fileExtension))
             exportFailed = false
             exportMessage = "Exported \(summary.objectCount) object\(summary.objectCount == 1 ? "" : "s"), "
-                + "\(summary.triangleCount.formatted()) triangles."
+                + "\(summary.triangleCount.formatted()) triangles to \(format.label)."
         } catch {
             exportFailed = true
             exportMessage = error.localizedDescription
@@ -831,6 +959,28 @@ struct Fixture3DView: View {
 
         scene.rootNode.addChildNode(node)
         applyLayerVisibility()
+        updateFloorPosition()
+    }
+
+    /// Rests the floor just under the lowest point of everything loaded —
+    /// fixture positions and scene geometry alike, regardless of which
+    /// layers are currently toggled on, so the floor doesn't jump around as
+    /// layers are shown/hidden. Scene geometry (a stage, truss base, etc.)
+    /// commonly sits at y=0 itself, which would otherwise coplane-flicker
+    /// against a floor fixed at y=0.
+    private func updateFloorPosition() {
+        var minY: CGFloat?
+        for node in markersNode.childNodes {
+            minY = min(minY ?? node.position.y, node.position.y)
+        }
+        if let geometry = sceneGeometryNode {
+            for layerNode in geometry.childNodes {
+                let (low, _) = layerNode.boundingBox
+                minY = min(minY ?? low.y, low.y)
+            }
+        }
+        guard let minY else { return }
+        floorNode.position.y = minY - 0.01
     }
 
     private var sceneArea: some View {
@@ -854,11 +1004,19 @@ struct Fixture3DView: View {
                     onZoom: { deltaY, point in
                         handleZoom(deltaY: deltaY, at: point)
                     },
-                    onClickGeometry: { objectID in
-                        // Clicks only select while the mode is on, so normal
-                        // orbiting isn't constantly changing the selection.
-                        guard isSelectingForExport, let objectID else { return }
-                        toggleSelection(objectID: objectID)
+                    onClick: { fixtureID, objectID in
+                        // Export selection owns the click while its mode is
+                        // on — otherwise a fixture standing in front of the
+                        // set piece being aimed at would steal it. Outside
+                        // that mode, clicking a fixture reveals it in the
+                        // table, and clicking geometry does nothing, so
+                        // ordinary orbiting never changes anything.
+                        if isSelectingForExport {
+                            guard let objectID else { return }
+                            toggleSelection(objectID: objectID)
+                        } else if let fixtureID {
+                            onSelectFixture(fixtureID)
+                        }
                     }
                 )
                 .onChange(of: showSceneGeometry) { _, _ in
@@ -868,8 +1026,8 @@ struct Fixture3DView: View {
                 if let hoveredFixture {
                     hoverCard(for: hoveredFixture)
                         .position(
-                            x: min(hoverPoint.x + 90, geo.size.width - 90),
-                            y: min(hoverPoint.y + 46, geo.size.height - 46)
+                            x: min(hoverPoint.x + 150, geo.size.width - 110),
+                            y: min(hoverPoint.y + 80, geo.size.height - 80)
                         )
                         .allowsHitTesting(false)
                 }
@@ -898,7 +1056,7 @@ struct Fixture3DView: View {
             }
         }
         .padding(10)
-        .background(.regularMaterial)
+        .background(.regularMaterial.opacity(0.8))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(radius: 6)
         .frame(width: 220, alignment: .leading)
@@ -937,7 +1095,35 @@ struct Fixture3DView: View {
         SCNTransaction.commit()
     }
 
+    @ViewBuilder
     private var legend: some View {
+        if isAutoIDPreview {
+            autoIDLegend
+        } else {
+            fixtureTypeLegend
+        }
+    }
+
+    /// Colours mean groups while previewing, so the per-type legend is
+    /// replaced by a note on how to read the overlay.
+    private var autoIDLegend: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "cube.transparent")
+                .foregroundStyle(.secondary)
+            Text("Smart Auto ID preview")
+                .font(.callout.weight(.medium))
+            Text("Each box is one group. The line and arrows run in the order IDs are assigned, starting at the dot.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text("\(autoIDGroups?.count ?? 0) groups")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+    }
+
+    private var fixtureTypeLegend: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 16) {
                 ForEach(sortedSpecs, id: \.self) { spec in
@@ -960,52 +1146,21 @@ struct Fixture3DView: View {
         return Color(hue: hue, saturation: 0.65, brightness: 0.85)
     }
 
-    /// Jumps the orbit state to a named preset, animated. Because we own
-    /// the camera transform outright (see HoverTrackingSCNView's doc
-    /// comment), this can never be silently overridden by anything else —
-    /// unlike the previous allowsCameraControl-based approach, this keeps
-    /// working after the user has manually dragged the view.
-    private func moveCamera(to preset: ViewPreset) {
+    /// Jumps the orbit state to a named direction, animated, keeping
+    /// whichever projection mode is currently selected. Because we own the
+    /// camera transform outright (see HoverTrackingSCNView's doc comment),
+    /// this can never be silently overridden by anything else — unlike the
+    /// previous allowsCameraControl-based approach, this keeps working
+    /// after the user has manually dragged the view.
+    private func moveCamera(to direction: CameraDirection) {
         // Presets frame everything currently visible rather than the
         // fixture-only bounds captured at init — with set geometry loaded
         // the rig is often a small part of the scene, and a preset that
         // ignored it would drop you inside the venue model.
         frameVisibleScene()
 
-        switch preset {
-        case .perspectiveFront:
-            isOrthographic = false
-            orbitYaw = 0
-            orbitPitch = atan(0.3)
-        case .perspectiveTop:
-            isOrthographic = false
-            orbitYaw = 0
-            orbitPitch = .pi / 2
-        case .orthoFront:
-            isOrthographic = true
-            orbitYaw = 0
-            orbitPitch = 0
-        case .orthoBack:
-            isOrthographic = true
-            orbitYaw = .pi
-            orbitPitch = 0
-        case .orthoLeft:
-            isOrthographic = true
-            orbitYaw = -.pi / 2
-            orbitPitch = 0
-        case .orthoRight:
-            isOrthographic = true
-            orbitYaw = .pi / 2
-            orbitPitch = 0
-        case .orthoTop:
-            isOrthographic = true
-            orbitYaw = 0
-            orbitPitch = .pi / 2
-        case .orthoBottom:
-            isOrthographic = true
-            orbitYaw = 0
-            orbitPitch = -.pi / 2
-        }
+        orbitYaw = direction.yaw
+        orbitPitch = direction.pitch
 
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0.4
@@ -1033,6 +1188,13 @@ struct Fixture3DView: View {
         let z = orbitTarget.z + orbitDistance * cos(orbitPitch) * cos(orbitYaw)
         cameraNode.position = SCNVector3(x, y, z)
         cameraNode.eulerAngles = SCNVector3(-orbitPitch, orbitYaw, 0)
+
+        // Tracks the orbit distance instead of sitting at SceneKit's default
+        // of 1.0, which quietly clipped away anything within a metre of the
+        // camera — so even once the orbit was allowed closer, a fixture
+        // being leaned into simply vanished. Scaling it keeps depth-buffer
+        // precision reasonable when pulled back across a whole venue.
+        camera.zNear = max(0.02, Double(orbitDistance) * 0.002)
 
         camera.usesOrthographicProjection = isOrthographic
         if isOrthographic {
@@ -1091,8 +1253,22 @@ struct Fixture3DView: View {
     /// zoom in, so you can point at a far corner of the rig and dive
     /// straight into it instead of having to zoom and then pan back to it.
     private func handleZoom(deltaY: CGFloat, at point: CGPoint) {
-        let factor = 1 + (-deltaY * 0.01)
-        let minDistance = max(sceneRadius * 0.05, 0.5)
+        // Exponential, so the rate is the same at any distance and zooming
+        // in then back out lands exactly where it started. The old linear
+        // 1%-per-unit rate was the real reason zooming "stopped": a festival
+        // file spreads its delay towers over 115m, so Fit All starts 161m
+        // out and reaching a fixture-sized 0.5m view took ~190 scroll
+        // notches. It was never clamped, just asymptotically slow. Clamped
+        // per event so trackpad momentum can't leap the whole range at once.
+        let factor = min(2, max(0.5, exp(-deltaY * 0.04)))
+        // Fixed rather than a fraction of the scene: tying it to scene size
+        // meant a festival-scale plot stopped you metres short of a fixture
+        // only 0.4m across, in exactly the files where it matters most.
+        // Far enough out to stay outside the fixture being inspected — the
+        // zoom target now lands on the surface under the cursor, so a much
+        // smaller floor put the camera inside the thing you were looking at.
+        // At 0.25m a 0.4m fixture already more than fills the frame.
+        let minDistance: CGFloat = 0.25
         let maxDistance = max(sceneRadius * 20, 50)
         let newDistance = min(maxDistance, max(minDistance, orbitDistance * factor))
 
@@ -1108,11 +1284,27 @@ struct Fixture3DView: View {
         applyCameraTransform()
     }
 
-    /// Unprojects a view point onto the plane through the orbit target that
-    /// faces the camera — i.e. "what is the cursor pointing at, at roughly
-    /// the depth we're looking".
+    /// What the cursor is actually pointing at, in world space.
+    ///
+    /// Uses the real surface under the cursor, falling back to the plane
+    /// through the orbit target only when the cursor is over empty sky.
+    /// The plane alone is right only for things sitting at the target's
+    /// depth, which is precisely wrong in the case that matters: after
+    /// framing a whole site the target lands on the centroid of everything,
+    /// so aiming at the far-off delay towers zoomed in correctly while
+    /// aiming at the stage — much nearer the camera — drifted the target
+    /// onto a point nowhere near it, and the stage never got closer.
     private func worldPoint(under point: CGPoint) -> SCNVector3? {
         guard let scnView else { return nil }
+
+        let hits = scnView.hitTest(point, options: [
+            .searchMode: SCNHitTestSearchMode.closest.rawValue,
+            .ignoreHiddenNodes: true,
+        ])
+        if let hit = hits.first {
+            return hit.worldCoordinates
+        }
+
         let projectedTarget = scnView.projectPoint(orbitTarget)
         return scnView.unprojectPoint(SCNVector3(CGFloat(point.x), CGFloat(point.y), CGFloat(projectedTarget.z)))
     }
@@ -1202,11 +1394,13 @@ struct Fixture3DView: View {
         fixtures: [MVRFixture],
         specColorIndex: [String: Int],
         specCount: Int,
-        document: MVRDocument
+        document: MVRDocument,
+        autoIDGroups: [AutoIDGroupOverlay]?
     ) -> (
         scene: SCNScene,
         cameraNode: SCNNode,
         markersNode: SCNNode,
+        floorNode: SCNNode,
         center: SCNVector3,
         radius: CGFloat,
         positionedCount: Int,
@@ -1216,6 +1410,18 @@ struct Fixture3DView: View {
     ) {
         let scene = SCNScene()
         scene.background.contents = NSColor(calibratedWhite: 0.06, alpha: 1)
+
+        // Fixtures take their proposed group's colour while previewing an
+        // Auto ID run, so the grouping reads directly off the rig.
+        var autoIDColors: [String: NSColor]?
+        if let autoIDGroups {
+            var colors: [String: NSColor] = [:]
+            for group in autoIDGroups {
+                for id in group.fixtureIDs { colors[id] = group.color }
+            }
+            autoIDColors = colors
+        }
+        var scenePositionsByFixture: [String: SCNVector3] = [:]
 
         let floor = SCNFloor()
         floor.reflectivity = 0
@@ -1269,11 +1475,27 @@ struct Fixture3DView: View {
             }
             let container = SCNNode()
             for root in assembly.roots {
-                container.addChildNode(root.buildNode(models: assembly.models, meshes: assembly.meshes))
+                container.addChildNode(root.buildNode(
+                    models: assembly.models,
+                    meshes: assembly.meshes,
+                    gltfMeshes: assembly.gltfMeshes))
             }
-            var hasGeometry = false
-            container.enumerateHierarchy { node, _ in if node.geometry != nil { hasGeometry = true } }
-            let result: SCNNode? = hasGeometry ? container : nil
+            pruneEmptyBranches(container)
+
+            // Collapse the whole fixture to a single mesh. A pixel bar is
+            // modelled as one mesh per pixel — 382 on a real ACME Pixel Line
+            // — so a rig holding 202 of them would otherwise cost 77,000
+            // draw calls for that one fixture type alone. Merging is safe
+            // here because every part of a fixture shares one material, and
+            // the fixture's own node (which carries its position, hover
+            // highlight and id) is untouched a level above.
+            let result: SCNNode?
+            if let merged = SCNGeometryMerge.merged(tree: container) {
+                let node = SCNNode(geometry: merged)
+                result = node
+            } else {
+                result = nil
+            }
             templateCache[spec] = .some(result)
             return result
         }
@@ -1289,9 +1511,14 @@ struct Fixture3DView: View {
 
             let index = specColorIndex[fixture.gdtfSpec] ?? 0
             let hue = specCount > 0 ? Double(index) / Double(specCount) : 0
-            let nsColor = NSColor(hue: hue, saturation: 0.65, brightness: 0.85, alpha: 1)
+            let nsColor = autoIDColors?[fixture.id]
+                ?? NSColor(hue: hue, saturation: 0.65, brightness: 0.85, alpha: 1)
 
-            let node: SCNNode
+            // Both representations are built once and swapped by hiding one
+            // or the other, rather than rebuilding the scene on every toggle
+            // — a rebuild costs about a second on a large file, which is far
+            // too slow for what should feel like flicking a switch.
+            let detailed: SCNNode
             if let template = template(for: fixture.gdtfSpec) {
                 // .clone() deep-copies the node hierarchy but shares
                 // geometry/material objects with the template — copy both
@@ -1304,16 +1531,40 @@ struct Fixture3DView: View {
                     newGeometry.materials = geometry.materials.map { $0.copy() as! SCNMaterial }
                     child.geometry = newGeometry
                 }
-                node = instance
+                detailed = instance
             } else if let box = envelope(for: fixture.gdtfSpec) {
                 let scnBox = SCNBox(width: CGFloat(box.width), height: CGFloat(box.height), length: CGFloat(box.length), chamferRadius: 0)
                 scnBox.firstMaterial?.diffuse.contents = nsColor
-                node = SCNNode(geometry: scnBox)
+                detailed = SCNNode(geometry: scnBox)
             } else {
-                let sphere = SCNSphere(radius: 0.12)
+                let sphere = SCNSphere(radius: Self.bubbleRadius)
                 sphere.firstMaterial?.diffuse.contents = nsColor
-                node = SCNNode(geometry: sphere)
+                detailed = SCNNode(geometry: sphere)
             }
+            // The fixture's own rotation — a moving light hung upside down
+            // under a truss, a bar angled on a boom. Applied to the
+            // representation rather than to the container, which carries
+            // the position and the hover scale and is what picking and
+            // framing work off. Multiplied in rather than assigned, so a
+            // GDTF template that arrives with a transform of its own keeps
+            // it.
+            if let orientation = MVRSceneGeometryLoader.orientation(
+                fromMatrixText: fixture.matrixText) {
+                detailed.transform = SCNMatrix4Mult(detailed.transform, orientation)
+            }
+            detailed.name = Self.detailedNodeName
+
+            let bubbleGeometry = SCNSphere(radius: Self.bubbleRadius)
+            bubbleGeometry.firstMaterial?.diffuse.contents = nsColor
+            let bubble = SCNNode(geometry: bubbleGeometry)
+            bubble.name = Self.bubbleNodeName
+
+            // The fixture's own node stays a plain container carrying the
+            // id, position and hover scale, so picking, highlighting and
+            // framing are all unaffected by which representation is showing.
+            let node = SCNNode()
+            node.addChildNode(detailed)
+            node.addChildNode(bubble)
 
             node.position = scenePos
             node.castsShadow = true
@@ -1328,6 +1579,12 @@ struct Fixture3DView: View {
             markerNodesByFixtureID[fixture.id] = node
             markerColorsByFixtureID[fixture.id] = nsColor
             markersNode.addChildNode(node)
+            scenePositionsByFixture[fixture.id] = scenePos
+        }
+
+        if let autoIDGroups {
+            scene.rootNode.addChildNode(
+                AutoIDOverlayBuilder.node(groups: autoIDGroups, positions: scenePositionsByFixture))
         }
 
         let center: SCNVector3
@@ -1339,6 +1596,12 @@ struct Fixture3DView: View {
             let xs = scenePositions.map(\.x)
             let ys = scenePositions.map(\.y)
             let zs = scenePositions.map(\.z)
+            // Rests the floor under the lowest fixture position rather than
+            // always at world y=0 — a stage or truss placed at y=0 would
+            // otherwise coplane-flicker against the floor plane. Scene
+            // geometry (which loads later, asynchronously) refines this
+            // further once it's available; see updateFloorPosition().
+            floorNode.position.y = (ys.min() ?? 0) - 0.01
             let minX = xs.min() ?? 0, maxX = xs.max() ?? 0
             let minY = ys.min() ?? 0, maxY = ys.max() ?? 0
             let minZ = zs.min() ?? 0, maxZ = zs.max() ?? 0
@@ -1359,8 +1622,8 @@ struct Fixture3DView: View {
         // the geometry that actually benefits from AO in a rig — fixture
         // bodies, truss members — sits at 0.1-0.5m scale, so a 5m radius
         // would occlude broadly instead of picking out real contact points.
-        cameraNode.camera?.screenSpaceAmbientOcclusionIntensity = 0.7
-        cameraNode.camera?.screenSpaceAmbientOcclusionRadius = 0.4
+        cameraNode.camera?.screenSpaceAmbientOcclusionIntensity = 1.4
+        cameraNode.camera?.screenSpaceAmbientOcclusionRadius = 0.5
 
         let distance = max(radius * 1.6, 6)
         cameraNode.position = SCNVector3(center.x, center.y + distance * 0.3, center.z + distance)
@@ -1370,12 +1633,12 @@ struct Fixture3DView: View {
         // A flat environment acts as image-based lighting for the
         // physically-based scene-geometry materials, which otherwise render
         // almost black where the directional light doesn't reach.
-        scene.lightingEnvironment.contents = NSColor(calibratedWhite: 0.45, alpha: 1)
-        scene.lightingEnvironment.intensity = 1.0
+        scene.lightingEnvironment.contents = NSColor(calibratedWhite: 0.65, alpha: 1)
+        scene.lightingEnvironment.intensity = 1.4
 
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = 350
+        ambient.intensity = 480
         let ambientNode = SCNNode()
         ambientNode.light = ambient
         scene.rootNode.addChildNode(ambientNode)
@@ -1384,7 +1647,7 @@ struct Fixture3DView: View {
         // read as shape rather than flat silhouette.
         let fill = SCNLight()
         fill.type = .directional
-        fill.intensity = 300
+        fill.intensity = 400
         fill.castsShadow = false
         let fillNode = SCNNode()
         fillNode.light = fill
@@ -1393,7 +1656,7 @@ struct Fixture3DView: View {
 
         let directional = SCNLight()
         directional.type = .directional
-        directional.intensity = 900
+        directional.intensity = 1150
         directional.castsShadow = true
         directional.shadowColor = NSColor(calibratedWhite: 0, alpha: 0.55)
         directional.shadowRadius = 6
@@ -1403,7 +1666,62 @@ struct Fixture3DView: View {
         directionalNode.eulerAngles = SCNVector3(-CGFloat.pi / 3, CGFloat.pi / 4, 0)
         scene.rootNode.addChildNode(directionalNode)
 
-        return (scene, cameraNode, markersNode, center, radius, scenePositions.count, fixturesByNodeName, markerNodesByFixtureID, markerColorsByFixtureID)
+        return (scene, cameraNode, markersNode, floorNode, center, radius, scenePositions.count, fixturesByNodeName, markerNodesByFixtureID, markerColorsByFixtureID)
+    }
+
+    /// True while the window is showing an Auto ID grouping preview, which
+    /// is a read-only look at proposed numbering — the geometry-export
+    /// tools have nothing to do with that job, and the fixture-type legend
+    /// would be actively wrong, since colours mean groups here.
+    private var isAutoIDPreview: Bool { autoIDGroups != nil }
+
+    /// Names of the two representations held under every fixture node, so
+    /// the toggle can find them without walking geometry.
+    private static let detailedNodeName = "fixtureDetailed"
+    private static let bubbleNodeName = "fixtureBubble"
+
+    /// Radius of a marker sphere, in metres. Deliberately fixed rather than
+    /// scaled per fixture — abstracting away the real size is the whole
+    /// point of bubble mode, and a consistent dot is easier to read across
+    /// a rig mixing tiny pars with metre-long pixel bars.
+    private static let bubbleRadius: CGFloat = 0.12
+
+    /// Shows whichever fixture representation is currently selected.
+    private func applyFixtureRepresentation() {
+        for node in markersNode.childNodes {
+            for child in node.childNodes {
+                switch child.name {
+                case Self.detailedNodeName: child.isHidden = !showRealFixtureGeometry
+                case Self.bubbleNodeName: child.isHidden = showRealFixtureGeometry
+                default: break
+                }
+            }
+        }
+    }
+
+    /// Strips branches of a built GDTF assembly that contain no geometry
+    /// anywhere, returning whether anything drawable survived.
+    ///
+    /// A GDTF geometry tree carries a node per kinematic part, beam, emitter
+    /// and mounting point, and most of those reference "Dummy" placeholder
+    /// models that produce nothing to draw — one real fixture arrives as 69
+    /// nodes holding 3 drawable meshes. Empty branches still cost scene-graph
+    /// traversal on every frame, multiplied by every fixture in the rig, so
+    /// they're dropped once per fixture type as the template is cached.
+    /// Only wholly geometry-free subtrees go: a node with no geometry of its
+    /// own is kept when it positions drawable children.
+    @discardableResult
+    private static func pruneEmptyBranches(_ node: SCNNode) -> Bool {
+        var keep = node.geometry != nil
+        // `childNodes` hands back a copy, so removing while iterating is safe.
+        for child in node.childNodes {
+            if pruneEmptyBranches(child) {
+                keep = true
+            } else {
+                child.removeFromParentNode()
+            }
+        }
+        return keep
     }
 
     /// A fixture's rough physical envelope in meters, derived from its
@@ -1457,23 +1775,3 @@ struct Fixture3DView: View {
     }
 }
 
-extension MVRFixture {
-    /// Best-effort extraction of (x, y, z) from the raw <Matrix> text.
-    /// Pulls every number out of the string (regardless of how MVR groups
-    /// them in braces) and takes the last three as the translation —
-    /// translation conventionally comes last in any 4x4 or 3x4 matrix
-    /// layout, row-major or column-major.
-    var position3D: (x: Double, y: Double, z: Double)? {
-        guard !matrixText.isEmpty else { return nil }
-
-        let cleaned = matrixText.replacingOccurrences(of: "{", with: " ")
-            .replacingOccurrences(of: "}", with: " ")
-            .replacingOccurrences(of: ",", with: " ")
-
-        let numbers = cleaned.split(separator: " ").compactMap { Double($0) }
-        guard numbers.count >= 3 else { return nil }
-
-        let last3 = Array(numbers.suffix(3))
-        return (last3[0], last3[1], last3[2])
-    }
-}

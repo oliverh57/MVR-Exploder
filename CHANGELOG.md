@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Smart Auto ID
+Auto ID is now **Smart Auto ID**, and the run survives the file.
+
+- **Sessions persist.** Merges, splits, order overrides, per-group tolerance and spacing, names, pinned start IDs, linked types and gaps are written into the MVR's private `<UserData>` block and picked back up on open — a header line says so, with **Start fresh** to discard. Keyed by MVR uuid, so a correction lapses only if the fixtures it describes are gone. About 3 KB for a 573-fixture show, invisible to consoles.
+- **ID gaps.** Two tickboxes: spare IDs after each group (room to add to a truss) and after each fixture (room to slot one in between). Blocks are sized from the span the gaps actually consume, so types can't run into each other.
+- **Suggested families.** Two lengths of one product — a Sceptron 320 and a Sceptron 100 — are offered as one system to number in a single sequence. The rule is narrow on purpose: the same name once a trailing number is stripped, so a MAC Aura is not paired with a MAC Viper. Turning a suggestion down is remembered.
+- **Bars now list downstage to upstage.** Row order banded depth by the *grouping* distance, which is about spacing along a bar, so bars 3 m apart fell in one band and were then ordered left-to-right — a type could read LX2, LX5, LX3, LX6, and the IDs were allocated in that order. Row order and LX numbering now share one banding rule. Affected 104 of 320 types across 49 of 143 real files.
+- **LX numbering explained.** A caption says why a type starts at LX2 and which type carries LX1, instead of leaving it in a tooltip.
+- **The attention badge is a button.** Clicking "1 type needs a look" goes to the next flagged group, and keeps going on each click.
+- **Escape asks first.** Closing with unsaved corrections confirms rather than binning the run silently; an untouched sitting still closes straight away, and Escape backs out of a rename or a split-in-progress before it means "close".
+- **Reproducible numbering.** The same file with the same settings could produce different IDs between launches: `MVRFixture.id` is a per-load UUID and was being used to break ties between coincident fixtures and to key cluster buckets. Both now key off what the file says.
+
+### 3D viewer
+- **Fixture rotation is applied.** Only the position was read from each fixture's `<Matrix>`; the rotation was discarded, so a light hung upside down under a truss drew the right way up. The Z-up to Y-up change of basis is the same one scene geometry already used.
+- **Export to FBX and DXF** alongside OBJ, from the same selection. FBX is written as binary 7.4 — Blender's importer rejects ASCII FBX outright — in centimetres, Y up. DXF is R12 with one layer per object, in metres, Z up, because CAD's plan view is the XY plane. DWG itself needs Autodesk's or the ODA's licence-gated libraries and cannot be shipped; DXF is the documented interchange format AutoCAD, Vectorworks and Rhino all open.
+
+### Fixes
+- **Export no longer deletes fixtures.** With scene geometry excluded, fixtures nested inside a `<SceneObject>` container were detached along with it — 328 of 328 on one real file, silently.
+- Large exports no longer balloon: `String(format:)` leaves an autoreleased string per coordinate, which took a 10.8-million-triangle export to 6.8 GB; DXF also streams to disk instead of building the file in memory.
+
+### Tests
+- An `MVR ExploderTests` target, 46 tests. Rigs are built from scratch in the tests rather than checked-in show files. `RealFileCorpusTests` sweeps a real library when `TEST_RUNNER_MVR_CORPUS` points at one, and skips otherwise.
+
 ## v1.0.0
 
 First tagged release. MVR Exploder imports, edits, compares, and exports MVR lighting show files, with a full 3D viewer.

@@ -17,6 +17,7 @@ struct FixtureIDMapView: View {
     private let sortedSpecs: [String]
     private let specColorIndex: [String: Int]
     private let totalCells: Int
+    private let segments: [IDMapSegment]
 
     private let columns = 50
     private let cellSize: CGFloat = 18
@@ -37,14 +38,10 @@ struct FixtureIDMapView: View {
         }
         self.specColorIndex = indexMap
 
-        // Smallest cell count that actually covers every real ID, with a
-        // floor of 100 and rounded up to a full row — not padded out to
-        // the next power of 10, which was massively over-rendering (e.g.
-        // 10,000 cells for a max ID of 1906 when ~1,950 would do).
-        let maxID = fixtures.compactMap { $0.currentFixtureID }.max() ?? 0
-        let minimum = 100
-        let needed = max(maxID + 1, minimum)
-        self.totalCells = ((needed + columns - 1) / columns) * columns
+        self.segments = IDMapLayout.segments(
+            usedIDs: fixturesByID.keys.sorted(),
+            columns: columns)
+        self.totalCells = segments.reduce(0) { $0 + $1.count }
     }
 
     var body: some View {
@@ -63,7 +60,7 @@ struct FixtureIDMapView: View {
             Text("Fixture ID Map")
                 .font(.headline)
             Spacer()
-            Text("\(fixturesByID.count) of \(totalCells) slots used")
+            Text("\(fixturesByID.count) IDs used, \(totalCells.formatted()) slots shown")
                 .foregroundStyle(.secondary)
             Button("Close", action: onClose)
         }
@@ -72,16 +69,41 @@ struct FixtureIDMapView: View {
 
     private var grid: some View {
         ScrollView {
-            LazyVGrid(
-                columns: Array(repeating: GridItem(.fixed(cellSize), spacing: cellSpacing), count: columns),
-                spacing: cellSpacing
-            ) {
-                ForEach(0..<totalCells, id: \.self) { id in
-                    cell(for: id)
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
+                    if index > 0 {
+                        skippedRange(from: segments[index - 1].end, to: segment.start)
+                    }
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(cellSize), spacing: cellSpacing), count: columns),
+                        spacing: cellSpacing
+                    ) {
+                        ForEach(segment.start...segment.end, id: \.self) { id in
+                            cell(for: id)
+                        }
+                    }
                 }
             }
             .padding(12)
         }
+    }
+
+    /// Stands in for a stretch of unused IDs too large to draw.
+    private func skippedRange(from previousEnd: Int, to nextStart: Int) -> some View {
+        let skipped = nextStart - previousEnd - 1
+        return HStack(spacing: 8) {
+            Rectangle()
+                .fill(Color.gray.opacity(0.25))
+                .frame(height: 1)
+            Text("\(skipped.formatted()) unused IDs")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Rectangle()
+                .fill(Color.gray.opacity(0.25))
+                .frame(height: 1)
+        }
+        .padding(.vertical, 4)
     }
 
     private func cell(for id: Int) -> some View {

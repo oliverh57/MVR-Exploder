@@ -35,6 +35,7 @@ struct SingleEditView: View {
     @State private var showRegenerateUUIDConfirm = false
     @State private var showRemoveUnpatchedConfirm = false
     @State private var showFixtureIDMap = false
+    @State private var autoIDSession: AutoIDSession?
     @StateObject private var viewer3D = Fixture3DWindowPresenter()
     @State private var selectedFixtureIDs: Set<String> = []
     @State private var recentlyJumpedIDs: Set<String> = []
@@ -42,8 +43,13 @@ struct SingleEditView: View {
     @State private var filterField: FixtureFilterField = .name
     @State private var filterText = ""
 
+    /// Any field differing from the loaded file — not just the three that
+    /// existed before name, layer and mode became editable, or a rename
+    /// would leave the reset control greyed out with changes pending.
     private var hasEdits: Bool {
-        document.fixtures.contains { $0.isFixtureIDEdited || $0.isAddressEdited || $0.isUUIDEdited }
+        document.fixtures.contains { fixture in
+            MVRFixtureField.allCases.contains { fixture.isEdited($0) }
+        }
     }
 
     private func unpatchedCount(_ criteria: MVRFixture.UnpatchedCriteria) -> Int {
@@ -90,6 +96,15 @@ struct SingleEditView: View {
         .sheet(isPresented: $showExportSheet) {
             exportSheet
         }
+        .sheet(item: $autoIDSession) { session in
+            AutoIDView(
+                session: session,
+                onCancel: { autoIDSession = nil },
+                onApply: {
+                    session.apply(to: document)
+                    autoIDSession = nil
+                })
+        }
         .sheet(isPresented: $showFixtureIDMap) {
             FixtureIDMapView(fixtures: document.fixtures) {
                 showFixtureIDMap = false
@@ -99,25 +114,29 @@ struct SingleEditView: View {
         }
     }
 
-    /// Clears any active filter (so target rows can't be hidden), selects
-    /// every fixture with this ID — so a clash highlights both — and adds
-    /// a bright flash on top of the native selection color.
-    ///
-    /// Selection and the flash set are both cleared first, then set again
-    /// a beat later: Table only auto-scrolls to a selection on a genuine
-    /// *change* to the binding, so jumping to the same fixture (or, it
-    /// turns out, sometimes any fixture after the first jump) needs an
-    /// explicit empty→filled transition to reliably re-trigger it.
+    /// Reveals every fixture carrying this Fixture ID — so a clash
+    /// highlights both rows, not just the first.
     private func jumpToFixture(withID fixtureID: Int) {
         let matches = document.fixtures.filter { ($0.currentFixtureID ?? 0) == fixtureID }
-        guard !matches.isEmpty else {
-            showFixtureIDMap = false
-            return
-        }
-        let ids = Set(matches.map(\.id))
+        showFixtureIDMap = false
+        guard !matches.isEmpty else { return }
+        revealFixtures(ids: Set(matches.map(\.id)))
+    }
+
+    /// Scrolls the table to these fixtures and marks them.
+    ///
+    /// Clears any active filter first, so a target row can't be sitting
+    /// hidden behind it. Scrolling itself is driven by selection: `Table`
+    /// has no programmatic scroll-to-row API, but it does scroll to follow
+    /// its selection binding — and only on a genuine *change* to that
+    /// binding, so selection and the flash set are cleared and then set a
+    /// beat later. Without that explicit empty→filled transition, revealing
+    /// the same fixture twice (and, in practice, sometimes any fixture after
+    /// the first) silently does nothing.
+    private func revealFixtures(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
 
         filterText = ""
-        showFixtureIDMap = false
         selectedFixtureIDs = []
         recentlyJumpedIDs = []
 
@@ -126,11 +145,51 @@ struct SingleEditView: View {
             withAnimation(.easeInOut(duration: 0.25).repeatCount(5, autoreverses: true)) {
                 recentlyJumpedIDs = ids
             }
+            // Selection alone is not enough to guarantee the row is on
+            // screen, so scroll to it explicitly once SwiftUI has had a pass
+            // to apply the cleared filter and new selection.
+            let rows = sortedFixtures
+            if let row = rows.firstIndex(where: { ids.contains($0.id) }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    Self.scrollTableToRow(row, rowCount: rows.count)
+                }
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
                 withAnimation(.easeOut(duration: 1.0)) {
                     recentlyJumpedIDs.subtract(ids)
                 }
             }
+        }
+    }
+
+    /// Scrolls the fixture table to a row.
+    ///
+    /// SwiftUI's `Table` has no programmatic scroll-to-row API; it scrolls
+    /// to follow its selection binding, but that's undocumented and doesn't
+    /// fire dependably — which leaves "reveal this fixture" looking broken
+    /// whenever the target row is off screen. On macOS `Table` is an
+    /// `NSTableView` underneath, so this finds it and scrolls it directly.
+    /// The row count is used to pick the right table out of whatever windows
+    /// are open, and everything here is best-effort: if the view tree ever
+    /// stops looking like this, the selection and flash still happen.
+    private static func scrollTableToRow(_ row: Int, rowCount: Int) {
+        func firstTableView(in view: NSView) -> NSTableView? {
+            if let table = view as? NSTableView { return table }
+            for subview in view.subviews {
+                if let found = firstTableView(in: subview) { return found }
+            }
+            return nil
+        }
+
+        for window in NSApp.windows {
+            guard
+                let content = window.contentView,
+                let table = firstTableView(in: content),
+                table.numberOfRows == rowCount,
+                row < table.numberOfRows
+            else { continue }
+            table.scrollRowToVisible(row)
+            return
         }
     }
 
@@ -173,13 +232,27 @@ struct SingleEditView: View {
 
             Spacer()
 
+            Button("Smart Auto ID…") {
+                autoIDSession = AutoIDSession(
+                    fixtures: document.fixtures,
+                    storedNames: document.groupNames,
+                    session: document.autoIDSession)
+            }
+            .disabled(document.fixtures.isEmpty)
+
             Button("Fixture ID Map…") {
                 showFixtureIDMap = true
             }
             .disabled(document.fixtures.isEmpty)
 
             Button("View 3D…") {
-                viewer3D.present(fixtures: document.fixtures, document: document, fileName: document.fileName)
+                viewer3D.present(
+                    fixtures: document.fixtures,
+                    document: document,
+                    fileName: document.fileName
+                ) { fixtureID in
+                    revealFixtures(ids: [fixtureID])
+                }
             }
             .disabled(document.fixtures.isEmpty)
 
@@ -260,40 +333,132 @@ struct SingleEditView: View {
             .width(28)
 
             TableColumn("Name", sortUsing: KeyPathComparator(\.name)) { fixture in
-                cell(fixture) { Text(fixture.name) }
+                cell(fixture) {
+                    editable(fixture, .name, text: fixture.name) {
+                        Text(fixture.name)
+                            .foregroundStyle(fixture.isNameEdited ? .blue : .primary)
+                    }
+                }
             }
             TableColumn("Fixture ID", sortUsing: KeyPathComparator(\.sortableFixtureID)) { fixture in
                 cell(fixture) {
-                    Text(fixture.currentFixtureID.map(String.init) ?? "-")
-                        .foregroundStyle(fixture.isFixtureIDEdited ? .blue : .primary)
+                    editable(fixture, .fixtureID, text: fixture.currentFixtureID.map(String.init) ?? "") {
+                        Text(fixture.currentFixtureID.map(String.init) ?? "-")
+                            .foregroundStyle(fixture.isFixtureIDEdited ? .blue : .primary)
+                    }
                 }
             }
             TableColumn("UUID", sortUsing: KeyPathComparator(\.currentUUID)) { fixture in
                 cell(fixture) {
-                    UUIDCell(uuid: fixture.currentUUID, color: fixture.isUUIDEdited ? .blue : .gray)
+                    editable(fixture, .uuid, text: fixture.currentUUID) {
+                        UUIDCell(uuid: fixture.currentUUID, color: fixture.isUUIDEdited ? .blue : .gray)
+                    }
                 }
             }
             TableColumn("Layer", sortUsing: KeyPathComparator(\.layerName)) { fixture in
-                cell(fixture) { Text(fixture.layerName.isEmpty ? "-" : fixture.layerName) }
+                cell(fixture) {
+                    EditableLayerCell(
+                        layerName: fixture.layerName,
+                        isEdited: fixture.isLayerEdited,
+                        layers: document.availableLayers,
+                        onSelect: { layer in
+                            document.setLayer(name: layer.name, uuid: layer.uuid, forFixtureAtID: fixture.id)
+                        },
+                        onReset: { document.resetField(.layer, forFixtureAtID: fixture.id) })
+                }
             }
             TableColumn("Universe", sortUsing: KeyPathComparator(\.sortableUniverse)) { fixture in
                 cell(fixture) {
-                    Text(fixture.universe)
-                        .foregroundStyle(fixture.isAddressEdited ? .blue : .primary)
+                    editable(fixture, .universe, text: fixture.universe == "-" ? "" : fixture.universe) {
+                        Text(fixture.universe)
+                            .foregroundStyle(fixture.isAddressEdited ? .blue : .primary)
+                    }
                 }
             }
             TableColumn("Channel", sortUsing: KeyPathComparator(\.sortableChannel)) { fixture in
                 cell(fixture) {
-                    Text(fixture.channel)
-                        .foregroundStyle(fixture.isAddressEdited ? .blue : .primary)
+                    editable(fixture, .channel, text: fixture.channel == "-" ? "" : fixture.channel) {
+                        Text(fixture.channel)
+                            .foregroundStyle(fixture.isAddressEdited ? .blue : .primary)
+                    }
                 }
             }
             TableColumn("GDTF Spec", sortUsing: KeyPathComparator(\.gdtfSpec)) { fixture in
                 cell(fixture) { Text(fixture.gdtfSpec) }
             }
             TableColumn("Mode", sortUsing: KeyPathComparator(\.mode)) { fixture in
-                cell(fixture) { Text(fixture.mode) }
+                cell(fixture) {
+                    editable(fixture, .mode, text: fixture.mode == "-" ? "" : fixture.mode) {
+                        Text(fixture.mode)
+                            .foregroundStyle(fixture.isModeEdited ? .blue : .primary)
+                    }
+                }
             }
+        }
+    }
+
+    /// Wraps a value in the hover-to-edit affordance, wiring one field to
+    /// the validation and setter that belong to it.
+    private func editable<Content: View>(
+        _ fixture: MVRFixture,
+        _ field: MVRFixtureField,
+        text: String,
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        EditableCell(
+            isEdited: fixture.isEdited(field),
+            editText: text,
+            validate: { Self.validate($0, for: field) },
+            onCommit: { apply($0, to: field, of: fixture) },
+            onReset: { document.resetField(field, forFixtureAtID: fixture.id) },
+            content: content)
+    }
+
+    private static func validate(_ value: String, for field: MVRFixtureField) -> String? {
+        switch field {
+        case .name, .mode:
+            return value.isEmpty ? "Cannot be empty." : nil
+        case .uuid:
+            return value.isEmpty ? "Cannot be empty." : nil
+        case .fixtureID:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return number < 0 ? "Cannot be negative." : nil
+        case .universe:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return number < 1 ? "Universe starts at 1." : nil
+        case .channel:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return (1...512).contains(number) ? nil : "Channel must be between 1 and 512."
+        case .layer:
+            return nil
+        }
+    }
+
+    /// Writes a validated value back through the document.
+    ///
+    /// Universe and Channel are two views of one absolute address, so each
+    /// is recombined with the other's current value rather than written
+    /// directly. A fixture with no patch at all is treated as universe 1 /
+    /// channel 1 so the first edit has somewhere to start from.
+    private func apply(_ value: String, to field: MVRFixtureField, of fixture: MVRFixture) {
+        switch field {
+        case .name:
+            document.setName(value, forFixtureAtID: fixture.id)
+        case .uuid:
+            document.setUUID(value, forFixtureAtID: fixture.id)
+        case .mode:
+            document.setGDTFMode(value, forFixtureAtID: fixture.id)
+        case .fixtureID:
+            guard let number = Int(value) else { return }
+            document.setFixtureID(number, forFixtureAtID: fixture.id)
+        case .universe, .channel:
+            guard let number = Int(value) else { return }
+            let existing = fixture.currentAddress.map(MVRFixture.universeAndChannel(fromAbsoluteAddress:))
+            let universe = field == .universe ? number : (existing?.universe ?? 1)
+            let channel = field == .channel ? number : (existing?.channel ?? 1)
+            document.setAddress((universe - 1) * 512 + channel, forFixtureAtID: fixture.id)
+        case .layer:
+            break
         }
     }
 
@@ -570,10 +735,7 @@ struct SingleEditView: View {
     private func presentSavePanelAndExport() {
         let panel = NSSavePanel()
         let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.nameFieldStringValue = "\(baseName)_edited.mvr"
-        if let mvrType = UTType(filenameExtension: "mvr") {
-            panel.allowedContentTypes = [mvrType]
-        }
+        panel.prepareForExport(named: "\(baseName)_edited", fileExtension: "mvr")
 
         let options = MVRExportOptions(
             includeSceneGeometry: includeSceneGeometry,
@@ -585,7 +747,7 @@ struct SingleEditView: View {
         panel.begin { response in
             guard response == .OK, let destinationURL = panel.url else { return }
             do {
-                try MVRExporter.export(document, to: destinationURL, options: options)
+                try MVRExporter.export(document, to: destinationURL.ensuringPathExtension("mvr"), options: options)
             } catch {
                 DispatchQueue.main.async {
                     self.errorMessage = "Export failed: \(error.localizedDescription)"
@@ -597,10 +759,7 @@ struct SingleEditView: View {
     private func presentSavePanelAndExportPatchPDF(layout: PatchPDFLayout) {
         let panel = NSSavePanel()
         let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.nameFieldStringValue = "\(baseName)_patch.pdf"
-        if let pdfType = UTType(filenameExtension: "pdf") {
-            panel.allowedContentTypes = [pdfType]
-        }
+        panel.prepareForExport(named: "\(baseName)_patch", fileExtension: "pdf")
 
         let fixtures = document.fixtures
         let title = "Patch List — \(document.fileName)"
@@ -608,7 +767,7 @@ struct SingleEditView: View {
         panel.begin { response in
             guard response == .OK, let destinationURL = panel.url else { return }
             do {
-                try MVRPatchPDFExporter.export(fixtures: fixtures, layout: layout, documentTitle: title, to: destinationURL)
+                try MVRPatchPDFExporter.export(fixtures: fixtures, layout: layout, documentTitle: title, to: destinationURL.ensuringPathExtension("pdf"))
             } catch {
                 DispatchQueue.main.async {
                     self.errorMessage = "Patch PDF export failed: \(error.localizedDescription)"

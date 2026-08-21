@@ -20,6 +20,16 @@ enum MVRIDFieldDetection {
     case ambiguous
 }
 
+/// One layer, by the two things that identify it. A layer is matched on
+/// uuid by MVR consumers, so the name alone is never enough to point a
+/// fixture at the right one.
+struct MVRLayerRef: Identifiable, Hashable {
+    let name: String
+    let uuid: String
+
+    var id: String { uuid }
+}
+
 /// Holds the parsed MVR scene as a mutable XMLDocument (the source of truth)
 /// plus a flattened `fixtures` array for display. Edits made through
 /// `applyFixtureIDOffset` / `applyUniverseOffset` / `generateNewUUIDs` /
@@ -28,9 +38,22 @@ enum MVRIDFieldDetection {
 final class MVRDocument: ObservableObject {
     @Published var fixtures: [MVRFixture] = []
     @Published var fileName: String = ""
+    /// Every layer in the file, for moving a fixture between them.
+    @Published private(set) var availableLayers: [MVRLayerRef] = []
 
     private(set) var originalFileURL: URL?
     private(set) var xmlDocument: XMLDocument?
+
+    /// Group names from an auto-ID run, keyed by the app's internal fixture
+    /// id. Kept out of the fixture list because they describe a *position*,
+    /// not a fixture field: nothing in the document changes when one is
+    /// set, and they are written to `<UserData>` on export rather than to
+    /// anything a console would read.
+    @Published private(set) var groupNames: [String: String] = [:]
+
+    /// The Auto ID session this file was last saved with, in *this* load's
+    /// fixture ids. Nil until a file carrying one is opened.
+    @Published private(set) var autoIDSession: AutoIDStoredSession?
 
     /// Which child element under <Fixture> holds the fixture's ID.
     /// Most MVR exporters use <FixtureID>, but some use <UnitNumber>
@@ -123,6 +146,7 @@ final class MVRDocument: ObservableObject {
             parsedFixtures.append(
                 MVRFixture(
                     id: UUID().uuidString,
+                    originalName: name,
                     name: name,
                     originalFixtureID: fixtureID,
                     currentFixtureID: fixtureID,
@@ -131,8 +155,11 @@ final class MVRDocument: ObservableObject {
                     originalUUID: uuid,
                     currentUUID: uuid,
                     gdtfSpec: gdtfSpec,
+                    originalMode: mode,
                     mode: mode,
+                    originalLayerName: layerName,
                     layerName: layerName,
+                    originalLayerUUID: layerUUID,
                     layerUUID: layerUUID,
                     classing: classing,
                     matrixText: matrixText,
@@ -143,10 +170,27 @@ final class MVRDocument: ObservableObject {
         }
 
         self.xmlDocument = document
+
+        // Names any earlier export left in <UserData>, remapped from MVR
+        // uuids onto this session's fixture ids.
+        let stored = MVRUserData.groupNames(in: document)
+        var restored: [String: String] = [:]
+        var idForUUID: [String: String] = [:]
+        for fixture in parsedFixtures {
+            idForUUID[fixture.originalUUID] = fixture.id
+            if let name = stored[fixture.originalUUID] { restored[fixture.id] = name }
+        }
+        self.groupNames = restored
+        // The rest of the session — merges, orders, pinned IDs — through
+        // the same remap. Corrections whose fixtures are no longer in the
+        // file drop out on the way.
+        self.autoIDSession = MVRUserData.session(in: document)?
+            .mappingKeys { idForUUID[$0] }
         self.originalFileURL = url
         self.fileName = url.lastPathComponent
         self.idFieldName = idFieldName
         self.fixtures = parsedFixtures
+        refreshAvailableLayers()
     }
 
     /// Drops the loaded file so a new one can be dragged in.
@@ -155,6 +199,9 @@ final class MVRDocument: ObservableObject {
         fileName = ""
         originalFileURL = nil
         xmlDocument = nil
+        groupNames = [:]
+        autoIDSession = nil
+        availableLayers = []
         idFieldName = "FixtureID"
         injectedGDTFFiles = [:]
     }
@@ -194,22 +241,75 @@ final class MVRDocument: ObservableObject {
         }
     }
 
-    /// Reverts every fixture's ID, address, and uuid back to the values
-    /// they had when the file was loaded.
+    /// Reverts every fixture back to the values it had when the file was
+    /// loaded.
+    ///
+    /// Iterates a snapshot and only touches fields that actually differ.
+    /// Resetting unconditionally meant every fixture went through the layer
+    /// setter — a DOM detach and re-attach plus a rebuild of the layer cache
+    /// each time — so resetting one edited Fixture ID did that work 661
+    /// times over and hung the app.
     func resetChanges() {
-        for index in fixtures.indices {
-            if let originalID = fixtures[index].originalFixtureID {
-                fixtures[index].currentFixtureID = originalID
-                fixtures[index].xmlElement.elements(forName: idFieldName).first?.stringValue = String(originalID)
+        for fixture in fixtures {
+            for field in MVRFixtureField.allCases where fixture.isEdited(field) {
+                resetField(field, forFixtureAtID: fixture.id)
             }
-            if let originalAddress = fixtures[index].originalAddress {
-                fixtures[index].currentAddress = originalAddress
-                fixtures[index].addressElement?.stringValue = String(originalAddress)
-            }
-            let originalUUID = fixtures[index].originalUUID
-            fixtures[index].currentUUID = originalUUID
-            setUUIDAttribute(originalUUID, on: fixtures[index].xmlElement)
         }
+    }
+
+    /// Reverts a single field of a single fixture, leaving its other edits
+    /// alone. Routed through the same setters as an edit, so the XML and the
+    /// in-memory fixture can't drift apart.
+    /// Records the group each fixture ended up in, from an auto-ID run.
+    func setGroupNames(_ names: [String: String]) {
+        groupNames = names
+    }
+
+    /// Records the Auto ID session, so the next export carries it and the
+    /// next open picks it back up.
+    func setAutoIDSession(_ session: AutoIDStoredSession?) {
+        autoIDSession = session
+    }
+
+    func resetField(_ field: MVRFixtureField, forFixtureAtID id: String) {
+        guard let fixture = fixtures.first(where: { $0.id == id }), fixture.isEdited(field) else { return }
+
+        switch field {
+        case .name:
+            setName(fixture.originalName, forFixtureAtID: id)
+        case .fixtureID:
+            if let original = fixture.originalFixtureID {
+                setFixtureID(original, forFixtureAtID: id)
+            }
+        case .uuid:
+            setUUID(fixture.originalUUID, forFixtureAtID: id)
+        case .layer:
+            setLayer(name: fixture.originalLayerName, uuid: fixture.originalLayerUUID, forFixtureAtID: id)
+        case .universe, .channel:
+            if let original = fixture.originalAddress {
+                setAddress(original, forFixtureAtID: id)
+            }
+        case .mode:
+            setGDTFMode(fixture.originalMode, forFixtureAtID: id)
+        }
+    }
+
+    /// Rebuilds the cached layer list from the document.
+    ///
+    /// Deliberately cached rather than computed on demand: the layer picker
+    /// asks for this from inside a table cell, so a computed version ran an
+    /// XPath over the whole scene description once per visible row per
+    /// render — which on a 6.8MB file made the table crawl.
+    private func refreshAvailableLayers() {
+        var seen: Set<String> = []
+        var result: [MVRLayerRef] = []
+        for case let layer as XMLElement in (try? xmlDocument?.nodes(forXPath: "//Layer")) ?? [] {
+            guard let uuid = layer.attribute(forName: "uuid")?.stringValue, seen.insert(uuid).inserted else { continue }
+            result.append(MVRLayerRef(
+                name: layer.attribute(forName: "name")?.stringValue ?? "Unnamed layer",
+                uuid: uuid))
+        }
+        availableLayers = result
     }
 
     /// Used by Compare mode to copy a UUID from a matched fixture in
@@ -289,6 +389,7 @@ final class MVRDocument: ObservableObject {
         fixture.currentAddress = newAddress
         fixture = MVRFixture(
             id: fixture.id,
+            originalName: fixture.originalName,
             name: fixture.name,
             originalFixtureID: fixture.originalFixtureID,
             currentFixtureID: fixture.currentFixtureID,
@@ -297,8 +398,11 @@ final class MVRDocument: ObservableObject {
             originalUUID: fixture.originalUUID,
             currentUUID: fixture.currentUUID,
             gdtfSpec: fixture.gdtfSpec,
+            originalMode: fixture.originalMode,
             mode: fixture.mode,
+            originalLayerName: fixture.originalLayerName,
             layerName: fixture.layerName,
+            originalLayerUUID: fixture.originalLayerUUID,
             layerUUID: fixture.layerUUID,
             classing: fixture.classing,
             matrixText: fixture.matrixText,
@@ -330,6 +434,7 @@ final class MVRDocument: ObservableObject {
 
         let existingLayers = layersElement.elements(forName: "Layer")
         let targetLayer: XMLElement
+        var createdLayer = false
 
         if !layerUUID.isEmpty, let byUUID = existingLayers.first(where: {
             $0.attribute(forName: "uuid")?.stringValue?.lowercased() == layerUUID.lowercased()
@@ -359,6 +464,7 @@ final class MVRDocument: ObservableObject {
             newLayer.addChild(XMLElement(name: "ChildList"))
             layersElement.addChild(newLayer)
             targetLayer = newLayer
+            createdLayer = true
         }
 
         let fixtureElement = fixtures[index].xmlElement
@@ -367,6 +473,10 @@ final class MVRDocument: ObservableObject {
 
         fixtures[index].layerName = layerName
         fixtures[index].layerUUID = targetLayer.attribute(forName: "uuid")?.stringValue ?? layerUUID
+        // Only when the layer list actually changed — this runs an XPath over
+        // the whole scene description, so doing it on every move is enough to
+        // stall a bulk operation.
+        if createdLayer { refreshAvailableLayers() }
     }
 
     /// Used by Compare mode to copy the "classing" grouping value from a

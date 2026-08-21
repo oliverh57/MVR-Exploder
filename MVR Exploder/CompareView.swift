@@ -616,7 +616,15 @@ struct CompareView: View {
 
             DispatchQueue.main.async {
                 self.pendingDrop = (side, url)
-                self.showFieldChoiceDialog = true
+
+                // Only ask when the file genuinely doesn't say which field
+                // is real — same detection Single Edit uses on import.
+                switch MVRDocument.detectIDField(at: url) {
+                case .determined(let fieldName):
+                    self.loadPendingDrop(idFieldName: fieldName)
+                case .ambiguous:
+                    self.showFieldChoiceDialog = true
+                }
             }
         }
 
@@ -696,10 +704,7 @@ struct CompareView: View {
 
         let panel = NSSavePanel()
         let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.nameFieldStringValue = "\(baseName)_edited.mvr"
-        if let mvrType = UTType(filenameExtension: "mvr") {
-            panel.allowedContentTypes = [mvrType]
-        }
+        panel.prepareForExport(named: "\(baseName)_edited", fileExtension: "mvr")
 
         let options = MVRExportOptions(
             includeSceneGeometry: includeSceneGeometry,
@@ -711,7 +716,7 @@ struct CompareView: View {
         panel.begin { response in
             guard response == .OK, let destinationURL = panel.url else { return }
             do {
-                try MVRExporter.export(document, to: destinationURL, options: options)
+                try MVRExporter.export(document, to: destinationURL.ensuringPathExtension("mvr"), options: options)
             } catch {
                 DispatchQueue.main.async {
                     switch side {

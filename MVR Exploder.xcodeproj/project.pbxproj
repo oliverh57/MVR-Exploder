@@ -10,14 +10,30 @@
 		839EF3FF3012009D00094940 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 839EF3FE3012009D00094940 /* ZIPFoundation */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		83AB000B3011FFC100094940 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 839EF3E73011FFC100094940 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 839EF3EE3011FFC100094940;
+			remoteInfo = "MVR Exploder";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		839EF3EF3011FFC100094940 /* MVR Exploder.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "MVR Exploder.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		83AB00023011FFC100094940 /* MVR ExploderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "MVR ExploderTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		839EF3F13011FFC100094940 /* MVR Exploder */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "MVR Exploder";
+			sourceTree = "<group>";
+		};
+		83AB00033011FFC100094940 /* MVR ExploderTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "MVR ExploderTests";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -31,6 +47,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		83AB00053011FFC100094940 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -38,6 +61,7 @@
 			isa = PBXGroup;
 			children = (
 				839EF3F13011FFC100094940 /* MVR Exploder */,
+				83AB00033011FFC100094940 /* MVR ExploderTests */,
 				839EF3F03011FFC100094940 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -46,6 +70,7 @@
 			isa = PBXGroup;
 			children = (
 				839EF3EF3011FFC100094940 /* MVR Exploder.app */,
+				83AB00023011FFC100094940 /* MVR ExploderTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -76,6 +101,29 @@
 			productReference = 839EF3EF3011FFC100094940 /* MVR Exploder.app */;
 			productType = "com.apple.product-type.application";
 		};
+		83AB00013011FFC100094940 /* MVR ExploderTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 83AB00073011FFC100094940 /* Build configuration list for PBXNativeTarget "MVR ExploderTests" */;
+			buildPhases = (
+				83AB00043011FFC100094940 /* Sources */,
+				83AB00053011FFC100094940 /* Frameworks */,
+				83AB00063011FFC100094940 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				83AB000A3011FFC100094940 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				83AB00033011FFC100094940 /* MVR ExploderTests */,
+			);
+			name = "MVR ExploderTests";
+			packageProductDependencies = (
+			);
+			productName = "MVR ExploderTests";
+			productReference = 83AB00023011FFC100094940 /* MVR ExploderTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -88,6 +136,10 @@
 				TargetAttributes = {
 					839EF3EE3011FFC100094940 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					83AB00013011FFC100094940 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 839EF3EE3011FFC100094940;
 					};
 				};
 			};
@@ -109,12 +161,20 @@
 			projectRoot = "";
 			targets = (
 				839EF3EE3011FFC100094940 /* MVR Exploder */,
+				83AB00013011FFC100094940 /* MVR ExploderTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		839EF3ED3011FFC100094940 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		83AB00063011FFC100094940 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -131,7 +191,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		83AB00043011FFC100094940 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		83AB000A3011FFC100094940 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 839EF3EE3011FFC100094940 /* MVR Exploder */;
+			targetProxy = 83AB000B3011FFC100094940 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		839EF3F83011FFC300094940 /* Debug */ = {
@@ -354,6 +429,44 @@
 			};
 			name = Release;
 		};
+		83AB00083011FFC100094940 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Oliver.MVR-ExploderTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MVR Exploder.app/Contents/MacOS/MVR Exploder";
+			};
+			name = Debug;
+		};
+		83AB00093011FFC100094940 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "Oliver.MVR-ExploderTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MVR Exploder.app/Contents/MacOS/MVR Exploder";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -371,6 +484,15 @@
 			buildConfigurations = (
 				839EF3FB3011FFC300094940 /* Debug */,
 				839EF3FC3011FFC300094940 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		83AB00073011FFC100094940 /* Build configuration list for PBXNativeTarget "MVR ExploderTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				83AB00083011FFC100094940 /* Debug */,
+				83AB00093011FFC100094940 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
