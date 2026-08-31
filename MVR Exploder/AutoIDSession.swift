@@ -227,7 +227,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
         self.defaultTypeOrder = order
         self.typeOrder = order
         self.includedTypes = Set(order)
-        self.startingID = 1001
+        self.startingID = AutoIDOptions.defaultStartingID
         self.gaps = AutoIDGaps()
         self.tolerance = .default
         self.plan = AutoIDPlan(assignments: [], types: [], groupsBySpec: [:], lxNumbersBySpec: [:], groupNamesBySpec: [:], collisions: [])
@@ -270,7 +270,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
     /// True when anything differs from what a fresh run over this file
     /// would produce. A file the user only looked at gets no block written.
     var hasCorrections: Bool {
-        startingID != 1001
+        startingID != AutoIDOptions.defaultStartingID
             || gaps != AutoIDGaps()
             || tolerance != .default
             || typeOrder != defaultTypeOrder
@@ -340,7 +340,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
         isRestoring = true
         typeOrder = defaultTypeOrder
         includedTypes = Set(defaultTypeOrder)
-        startingID = 1001
+        startingID = AutoIDOptions.defaultStartingID
         gaps = AutoIDGaps()
         tolerance = .default
         typeStartingID = [:]
@@ -503,20 +503,19 @@ final class AutoIDSession: ObservableObject, Identifiable {
         guard !names.isEmpty else { return nil }
 
         let bars = lowest == 2 ? "LX1" : "LX1–LX\(lowest - 1)"
-        // Named in full up to three; past that the list stops being a
-        // useful answer to "so where is LX1?" and becomes a wall of text.
+        // Two named, then a count. Three names ran the note to three lines
+        // in the pane, which is more room than "so where is LX1?" is worth.
         let on: String
         switch names.count {
         case 1: on = names[0]
         case 2: on = names.joined(separator: " and ")
-        case 3: on = names.prefix(2).joined(separator: ", ") + " and " + names[2]
-        default:
-            on = names.prefix(2).joined(separator: ", ") + " and \(names.count - 2) others"
+        default: on = names.prefix(2).joined(separator: ", ")
+            + " and \(names.count - 2) other\(names.count == 3 ? "" : "s")"
         }
         // The subject is the bars, not the types: one bar below is "LX1
         // is", several is "LX1–LX3 are".
-        return "Bars are numbered across the whole rig, so this type starts at "
-            + "LX\(lowest). \(bars) \(lowest == 2 ? "is" : "are") on \(on)."
+        return "Bars are numbered across the whole rig. \(bars) "
+            + "\(lowest == 2 ? "is" : "are") on \(on), so this type starts at LX\(lowest)."
     }
 
     private func orderedUniqueNames(_ names: [String]) -> [String] {

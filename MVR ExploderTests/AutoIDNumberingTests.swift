@@ -11,7 +11,7 @@ final class AutoIDNumberingTests: XCTestCase {
 
     func testOneBarNumbersStraightThroughFromTheStartingID() throws {
         let session = try makeSession(MVRTestRig.bar("Spot", count: 5, y: 0))
-        XCTAssertEqual(ids(session), [1001, 1002, 1003, 1004, 1005])
+        XCTAssertEqual(ids(session), [101, 102, 103, 104, 105])
     }
 
     func testEachTypeGetsItsOwnBlock() throws {
@@ -29,7 +29,7 @@ final class AutoIDNumberingTests: XCTestCase {
         let session = try makeSession(MVRTestRig.bar("Spot", count: 4, y: 0))
         session.gaps = AutoIDGaps(
             betweenGroups: false, groupGap: 10, betweenFixtures: true, fixtureGap: 1)
-        XCTAssertEqual(ids(session), [1001, 1003, 1005, 1007])
+        XCTAssertEqual(ids(session), [101, 103, 105, 107])
     }
 
     func testGapBetweenGroupsLeavesSpareIDs() throws {
@@ -37,8 +37,8 @@ final class AutoIDNumberingTests: XCTestCase {
             MVRTestRig.bar("Spot", count: 3, y: 0) + MVRTestRig.bar("Spot", count: 3, y: 5000))
         session.gaps = AutoIDGaps(
             betweenGroups: true, groupGap: 10, betweenFixtures: false, fixtureGap: 1)
-        // 1001–1003, ten spare, then 1014.
-        XCTAssertEqual(ids(session), [1001, 1002, 1003, 1014, 1015, 1016])
+        // 101–103, ten spare, then 114.
+        XCTAssertEqual(ids(session), [101, 102, 103, 114, 115, 116])
     }
 
     func testGapsOffChangeNothing() throws {
@@ -87,7 +87,7 @@ final class AutoIDNumberingTests: XCTestCase {
 
         session.setStartingID(2001, forGroup: 1, in: spec)
 
-        XCTAssertEqual(ids(session), [1001, 1002, 1003, 2001, 2002, 2003, 2004, 2005, 2006])
+        XCTAssertEqual(ids(session), [101, 102, 103, 2001, 2002, 2003, 2004, 2005, 2006])
     }
 
     func testNoCollisionsInAPlainRun() throws {

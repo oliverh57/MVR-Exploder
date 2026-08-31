@@ -35,6 +35,7 @@ struct SingleEditView: View {
     @State private var showRegenerateUUIDConfirm = false
     @State private var showRemoveUnpatchedConfirm = false
     @State private var showFixtureIDMap = false
+    @State private var showPatchCheck = false
     @State private var autoIDSession: AutoIDSession?
     @StateObject private var viewer3D = Fixture3DWindowPresenter()
     @State private var selectedFixtureIDs: Set<String> = []
@@ -104,6 +105,12 @@ struct SingleEditView: View {
                     session.apply(to: document)
                     autoIDSession = nil
                 })
+        }
+        .sheet(isPresented: $showPatchCheck) {
+            PatchCheckView(
+                document: document,
+                onClose: { showPatchCheck = false },
+                onSelectFixtures: { revealFixtures(ids: $0) })
         }
         .sheet(isPresented: $showFixtureIDMap) {
             FixtureIDMapView(fixtures: document.fixtures) {
@@ -242,6 +249,11 @@ struct SingleEditView: View {
 
             Button("Fixture ID Map…") {
                 showFixtureIDMap = true
+            }
+            .disabled(document.fixtures.isEmpty)
+
+            Button("Patch Check…") {
+                showPatchCheck = true
             }
             .disabled(document.fixtures.isEmpty)
 

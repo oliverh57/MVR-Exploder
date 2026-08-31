@@ -50,6 +50,8 @@ struct AutoIDView: View {
     @State private var pinTarget: PinTarget?
     /// Set when closing would lose work and the user hasn't said yes yet.
     @State private var isConfirmingCancel = false
+    /// Whether the list of groups still wanting a look is open.
+    @State private var showAttentionList = false
     @State private var pinText = ""
     /// Set after a pin creates clashes, holding what to put back if the
     /// user decides against it.
@@ -259,12 +261,10 @@ struct AutoIDView: View {
                 .foregroundStyle(.secondary)
         } else {
             // A button, not a label: saying a type needs a look and leaving
-            // the user to find which group is half an answer. Each click
-            // takes the next one, so the flagged groups can be worked
-            // through without hunting for them — and selecting a group is
-            // what marks it seen, so the count comes down as you go.
+            // the user to find which group is half an answer. Clicking
+            // lists them, and each one goes straight there.
             Button {
-                goToNextGroupNeedingAttention(targets)
+                showAttentionList.toggle()
             } label: {
                 Label(
                     flagged.count == 1 ? "1 type needs a look" : "\(flagged.count) types need a look",
@@ -274,8 +274,10 @@ struct AutoIDView: View {
             }
             .buttonStyle(.plain)
             .help("\(targets.count) group\(targets.count == 1 ? "" : "s") with a shape that has "
-                  + "no obvious order. Click to go to the next one:\n"
-                  + flagged.map { session.displayName(for: $0) }.joined(separator: "\n"))
+                  + "no obvious order. Click to list them.")
+            .popover(isPresented: $showAttentionList, arrowEdge: .bottom) {
+                attentionList(targets)
+            }
         }
     }
 
@@ -290,14 +292,50 @@ struct AutoIDView: View {
             }
     }
 
-    /// Selects the next flagged group after whatever is selected now, so
-    /// repeated clicks walk the list rather than sticking on the first one.
-    private func goToNextGroupNeedingAttention(_ targets: [(spec: String, group: Int)]) {
-        guard !targets.isEmpty else { return }
-        let current = selectedSpec
-        let selected = selectedGroups.count == 1 ? selectedGroups.first : nil
-        let next = targets.first { $0.spec != current || $0.group != selected } ?? targets[0]
-        focus(spec: next.spec, group: next.group)
+    /// The flagged groups, named and clickable.
+    ///
+    /// A list rather than a cycle: with five types flagged, "click again
+    /// for the next one" gives no sense of how much is left or what is on
+    /// it. Selecting a group is what marks it seen, so the list shortens
+    /// as they are worked through.
+    private func attentionList(_ targets: [(spec: String, group: Int)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Groups with no obvious numbering order")
+                .font(.caption.weight(.medium))
+            Text("The shape doesn't say which way the numbers should run. "
+                 + "Open one and pick an order, or accept the suggested one.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(targets.enumerated()), id: \.offset) { _, target in
+                        Button {
+                            focus(spec: target.spec, group: target.group)
+                            showAttentionList = false
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                Text(session.name(forGroup: target.group, in: target.spec))
+                                Text(session.displayName(for: target.spec))
+                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 0)
+                            }
+                            .font(.caption)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+        }
+        .padding(12)
+        .frame(width: 320)
     }
 
     /// What Escape and the Cancel button do.
@@ -1069,32 +1107,25 @@ struct AutoIDView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
 
+                // Marked as a note and kept clear of the controls. It sat
+                // directly above Reset grouping, which read as a label
+                // explaining that button rather than as a remark about the
+                // numbering.
                 if let note = session.lowestBarNote(for: spec) {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 4)
-                }
-
-                // No Merge button: merging is on the group's own right-click
-                // menu, where the groups being merged are the ones in hand.
-                // A second way in at the top of the column only raised the
-                // question of which one to use.
-                HStack(spacing: 8) {
-                    Spacer()
-
-                    Button("Reset grouping") {
-                        session.resetGrouping(for: spec)
-                        selectedGroups = []
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Image(systemName: "info.circle")
+                        Text(note)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .disabled(!session.hasManualGrouping(for: spec))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
                 }
-                .padding(12)
 
                 if let range = session.groupingRange(for: spec) {
                     Divider()
+                        .padding(.top, 8)
                     spacingControls(spec: spec, range: range)
                 }
 
@@ -1136,6 +1167,22 @@ struct AutoIDView: View {
                             .frame(width: 300)
                     }
                 }
+
+                // At the foot of the pane, under the groups it resets —
+                // and out of the way of the notes and controls at the top,
+                // which it is nothing to do with.
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Reset grouping") {
+                        session.resetGrouping(for: spec)
+                        selectedGroups = []
+                    }
+                    .disabled(!session.hasManualGrouping(for: spec))
+                    .help("Undo every merge and split in this type.")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
                 .alert("Set starting ID", isPresented: Binding(
             get: { pinTarget != nil },
             set: { if !$0 { pinTarget = nil } })

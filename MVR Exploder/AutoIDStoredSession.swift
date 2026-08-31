@@ -23,7 +23,7 @@ struct AutoIDStoredSession: Codable, Equatable {
         var value: Value
     }
 
-    var startingID: Int = 1001
+    var startingID = AutoIDOptions.defaultStartingID
     var gaps = AutoIDGaps()
     var tolerance = AutoIDTolerance.default
     var typeOrder: [String] = []

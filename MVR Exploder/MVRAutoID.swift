@@ -96,7 +96,7 @@ struct AutoIDGaps: Codable, Equatable {
 
     var groupSpacing: Int { betweenGroups ? max(0, groupGap) : 0 }
     /// How much each fixture advances the count. One more than the gap:
-    /// a gap of 1 numbers 1001, 1003, 1005.
+    /// a gap of 1 numbers 101, 103, 105.
     var fixtureStep: Int { betweenFixtures ? max(1, fixtureGap + 1) : 1 }
 
     var isActive: Bool { groupSpacing > 0 || fixtureStep > 1 }
@@ -114,8 +114,11 @@ struct AutoIDOptions {
     var groupTolerance: [Set<String>: AutoIDTolerance] = [:]
 
     /// Where the first block begins. User-set, because whether a rig starts
-    /// at 1 or 1001 is a house convention, not something to infer.
-    var startingID: Int = 1001
+    /// at 1, 101 or 1001 is a house convention, not something to infer.
+    var startingID: Int = defaultStartingID
+
+    /// Where a run starts unless the user says otherwise.
+    static let defaultStartingID = 101
 
     /// GDTF specs in the order their blocks are allocated — the first gets
     /// the lowest numbers. User-ordered (drag to rearrange); anything not
@@ -1825,7 +1828,7 @@ enum MVRAutoID {
     // MARK: - Numbering
 
     /// Smallest `k * blockSize + 1` that is at least `cursor`, so blocks
-    /// read as 1001, 2001, 2301 rather than starting mid-hundred.
+    /// read as 101, 201, 1001 rather than starting mid-hundred.
     /// One type's clusters, sized but not yet numbered.
     private struct PendingType {
         let spec: String
@@ -1879,7 +1882,14 @@ enum MVRAutoID {
                 continue
             }
 
-            var start = blockStart(atLeast: cursor, blockSize: size)
+            // The user's own number is used as given; only the blocks
+            // after it are rounded up to a boundary. Rounding the first one
+            // too would quietly ignore a start of 101 whenever the first
+            // type is big enough to want a thousand-block, and hand back
+            // 1001 instead.
+            var start = cursor == max(1, options.startingID)
+                ? cursor
+                : blockStart(atLeast: cursor, blockSize: size)
             let span = max(type.idSpan, 1)
             while let clash = reserved.first(where: { $0.overlaps(start...(start + span - 1)) }) {
                 start = blockStart(atLeast: clash.upperBound + 1, blockSize: size)
