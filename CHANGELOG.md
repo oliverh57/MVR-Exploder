@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v1.1.0
+
+_30 September 2026_
 
 ### Smart Auto ID
 Auto ID is now **Smart Auto ID**, and the run survives the file.
