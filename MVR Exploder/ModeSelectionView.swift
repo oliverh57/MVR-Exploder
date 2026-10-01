@@ -12,7 +12,12 @@ struct ModeSelectionView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 20) {
+            // Wraps rather than running off the side: four cards side by
+            // side need a window wider than the one this opens in.
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 250, maximum: 250), spacing: 20)],
+                spacing: 20
+            ) {
                 modeCard(
                     title: "Single Edit",
                     subtitle: "Import one MVR file, offset fixture IDs or universes, regenerate UUIDs, and export.",
@@ -22,13 +27,30 @@ struct ModeSelectionView: View {
                 }
 
                 modeCard(
+                    title: "Smart Auto ID",
+                    subtitle: "Group an MVR's fixtures into trusses, number them in the order they hang, and export.",
+                    systemImage: "number.square"
+                ) {
+                    onSelect(.smartAutoID)
+                }
+
+                modeCard(
                     title: "Compare",
                     subtitle: "Import two MVR files, match their fixtures by UUID or Fixture ID, and see them side by side.",
                     systemImage: "rectangle.split.2x1"
                 ) {
                     onSelect(.compare)
                 }
+
+                modeCard(
+                    title: "Disguise CSV",
+                    subtitle: "Map an MVR's fixtures to a DMX screen and export the x,y,universe,channel CSV Disguise reads.",
+                    systemImage: "square.grid.3x3.fill"
+                ) {
+                    onSelect(.disguiseCSV)
+                }
             }
+            .frame(maxWidth: 1060)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

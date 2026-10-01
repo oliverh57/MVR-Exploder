@@ -1761,6 +1761,30 @@ enum MVRAutoID {
             .map(\.fixture.id)
     }
 
+    /// The same fixtures, sorted into the order a strategy would number
+    /// them.
+    ///
+    /// `orderedIDs` answers with ids and drops anything it can't place;
+    /// this keeps the whole list, which is what a view showing every
+    /// fixture of a type needs. Fixtures with no position can't be ordered
+    /// by one, so they hold their place in the list they came in and
+    /// follow at the end.
+    static func inOrder(
+        fixtures: [MVRFixture],
+        strategy: AutoIDOrderStrategy,
+        tolerance: AutoIDTolerance = .default
+    ) -> [MVRFixture] {
+        let ids = orderedIDs(fixtures: fixtures, strategy: strategy, tolerance: tolerance)
+        var rank: [String: Int] = [:]
+        for (index, id) in ids.enumerated() { rank[id] = index }
+        return fixtures.enumerated().sorted { first, second in
+            let firstRank = rank[first.element.id] ?? Int.max
+            let secondRank = rank[second.element.id] ?? Int.max
+            if firstRank != secondRank { return firstRank < secondRank }
+            return first.offset < second.offset
+        }.map(\.element)
+    }
+
     /// The strategy this group would be numbered by if left alone.
     static func suggestedStrategy(
         fixtures: [MVRFixture],

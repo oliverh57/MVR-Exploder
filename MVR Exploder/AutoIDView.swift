@@ -10,6 +10,10 @@ struct AutoIDView: View {
     @ObservedObject var session: AutoIDSession
     let onCancel: () -> Void
     let onApply: () -> Void
+    /// Set when this is the whole window rather than a sheet over a table,
+    /// in which case it takes whatever room there is instead of the fixed
+    /// size a sheet needs.
+    var fillsWindow: Bool = false
     @State private var selectedSpecs: Set<String> = []
 
     /// The type being worked on. Multiple selection exists only for
@@ -88,7 +92,9 @@ struct AutoIDView: View {
             Divider()
             footer
         }
-        .frame(width: 1280, height: 760)
+        .frame(width: fillsWindow ? nil : 1280, height: fillsWindow ? nil : 760)
+        .frame(maxWidth: fillsWindow ? .infinity : nil,
+               maxHeight: fillsWindow ? .infinity : nil)
         // Escape is routed through `requestCancel` by the Cancel button's
         // shortcut instead of quietly dismissing the sheet, which threw
         // away a whole sitting's merges, orders and names with no warning.
