@@ -338,6 +338,15 @@ final class MVRDocument: ObservableObject {
         fixtures.remove(at: index)
     }
 
+    /// Removes several fixtures in one pass, for deleting a multiple
+    /// selection from a table.
+    func deleteFixtures(withIDs ids: Set<String>) {
+        for fixture in fixtures where ids.contains(fixture.id) {
+            fixture.xmlElement.detach()
+        }
+        fixtures.removeAll { ids.contains($0.id) }
+    }
+
     /// Removes every fixture matching the given "non-patched" definition,
     /// detaching each from the underlying XML too.
     func removeFixtures(matching criteria: MVRFixture.UnpatchedCriteria) {

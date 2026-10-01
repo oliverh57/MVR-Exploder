@@ -407,6 +407,16 @@ struct SingleEditView: View {
                 }
             }
         }
+        // Right-clicking inside a selection acts on all of it; right-clicking
+        // an unselected row acts on that row alone.
+        .contextMenu(forSelectionType: String.self) { ids in
+            if !ids.isEmpty {
+                Button(ids.count == 1 ? "Delete Fixture" : "Delete \(ids.count) Fixtures", role: .destructive) {
+                    document.deleteFixtures(withIDs: ids)
+                    selectedFixtureIDs.subtract(ids)
+                }
+            }
+        }
     }
 
     /// Wraps a value in the hover-to-edit affordance, wiring one field to

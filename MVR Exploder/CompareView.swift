@@ -31,6 +31,7 @@ struct CompareView: View {
     @State private var showFileAColumns = true
     @State private var showFileBColumns = true
     @State private var sortOrder: [KeyPathComparator<MVRComparisonRow>] = []
+    @State private var selectedRowIDs: Set<String> = []
     @State private var filterField: FixtureFilterField = .name
     @State private var filterText = ""
 
@@ -467,7 +468,7 @@ struct CompareView: View {
     }
 
     private var comparisonTable: some View {
-        Table(sortedComparisonRows, sortOrder: $sortOrder) {
+        Table(sortedComparisonRows, selection: $selectedRowIDs, sortOrder: $sortOrder) {
             TableColumn("Status") { row in
                 cell(row: row) {
                     HStack(spacing: 6) {
@@ -554,6 +555,23 @@ struct CompareView: View {
                 }
             }
         }
+        // Right-clicking inside a selection acts on all of it; right-clicking
+        // an unselected row acts on that row alone. Deletes both sides of a
+        // row, as the row's own delete button does.
+        .contextMenu(forSelectionType: String.self) { ids in
+            if !ids.isEmpty {
+                Button(ids.count == 1 ? "Delete Row" : "Delete \(ids.count) Rows", role: .destructive) {
+                    deleteRows(withIDs: ids)
+                }
+            }
+        }
+    }
+
+    private func deleteRows(withIDs ids: Set<String>) {
+        let rows = comparisonRows.filter { ids.contains($0.id) }
+        leftDocument.deleteFixtures(withIDs: Set(rows.compactMap { $0.leftFixture?.id }))
+        rightDocument.deleteFixtures(withIDs: Set(rows.compactMap { $0.rightFixture?.id }))
+        selectedRowIDs.subtract(ids)
     }
 
     /// True when the row is a match and both sides have equal values for
