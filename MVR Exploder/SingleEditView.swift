@@ -36,7 +36,6 @@ struct SingleEditView: View {
     @State private var showRemoveUnpatchedConfirm = false
     @State private var showFixtureIDMap = false
     @State private var showPatchCheck = false
-    @State private var autoIDSession: AutoIDSession?
     @StateObject private var viewer3D = Fixture3DWindowPresenter()
     @State private var selectedFixtureIDs: Set<String> = []
     @State private var recentlyJumpedIDs: Set<String> = []
@@ -96,15 +95,6 @@ struct SingleEditView: View {
         }
         .sheet(isPresented: $showExportSheet) {
             exportSheet
-        }
-        .sheet(item: $autoIDSession) { session in
-            AutoIDView(
-                session: session,
-                onCancel: { autoIDSession = nil },
-                onApply: {
-                    session.apply(to: document)
-                    autoIDSession = nil
-                })
         }
         .sheet(isPresented: $showPatchCheck) {
             PatchCheckView(
@@ -238,14 +228,6 @@ struct SingleEditView: View {
                 .foregroundStyle(.secondary)
 
             Spacer()
-
-            Button("Smart Auto ID…") {
-                autoIDSession = AutoIDSession(
-                    fixtures: document.fixtures,
-                    storedNames: document.groupNames,
-                    session: document.autoIDSession)
-            }
-            .disabled(document.fixtures.isEmpty)
 
             Button("Fixture ID Map…") {
                 showFixtureIDMap = true

@@ -102,6 +102,10 @@ struct MVRFixture: Identifiable {
     /// sort to the bottom via Int.min.
     var sortableFixtureID: Int { currentFixtureID ?? Int.min }
     var sortableAddress: Int { currentAddress ?? Int.min }
+    /// Stage position in millimetres, for sorting a table by where things
+    /// physically are. Unpositioned fixtures sort to the bottom.
+    var sortableX: Int { position3D.map { Int($0.x) } ?? Int.max }
+    var sortableY: Int { position3D.map { Int($0.y) } ?? Int.max }
     var sortableUniverse: Int {
         currentAddress.map { Self.universeAndChannel(fromAbsoluteAddress: $0).universe } ?? Int.min
     }
