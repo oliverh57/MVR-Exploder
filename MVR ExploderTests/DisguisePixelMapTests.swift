@@ -489,3 +489,129 @@ final class PixelGapTests: XCTestCase {
         XCTAssertTrue(squares.contains([22, 0]))
     }
 }
+
+/// Which way the pixels are counted inside one fixture.
+final class PixelOrderTests: XCTestCase {
+
+    private func block(_ order: DisguisePixelMap.PixelOrder) -> DisguisePixelMap.Block {
+        DisguisePixelMap.Block(columns: 4, rows: 2, order: order)
+    }
+
+    func testRowsCountLeftToRightEveryRow() {
+        XCTAssertEqual(block(.rows).sequence, [0, 1, 2, 3, 4, 5, 6, 7])
+    }
+
+    func testSnakingRowsDoubleBack() {
+        XCTAssertEqual(block(.rowsZigZag).sequence, [0, 1, 2, 3, 7, 6, 5, 4])
+    }
+
+    func testColumnsCountDownward() {
+        XCTAssertEqual(block(.columns).sequence, [0, 4, 1, 5, 2, 6, 3, 7])
+    }
+
+    func testSnakingColumnsDoubleBack() {
+        XCTAssertEqual(block(.columnsZigZag).sequence, [0, 4, 5, 1, 2, 6, 7, 3])
+    }
+
+    /// Every cell is counted exactly once, whichever way round.
+    func testEveryPixelIsCountedOnce() {
+        for order in DisguisePixelMap.PixelOrder.allCases {
+            XCTAssertEqual(block(order).sequence.sorted(), Array(0..<8), order.label)
+        }
+    }
+
+    /// The fill counts along the order, so a snaking fixture's offsets
+    /// snake with it: the cell after 3 on the top row is the one *below*
+    /// it, not the one at the start of row two.
+    func testSuggestionsFollowTheSnake() {
+        var snake = block(.rowsZigZag)
+        snake.setOffset(1, column: 0, row: 0)
+        let suggested = snake.suggestions(anchor: 0, value: 1, step: 3)
+
+        XCTAssertEqual(suggested[3], 10, "end of the top row is pixel 4")
+        XCTAssertEqual(suggested[7], 13, "and pixel 5 is directly below it")
+        XCTAssertEqual(suggested[4], 22, "the far end of row two is pixel 8")
+    }
+
+    /// The CSV's rows follow the count too.
+    func testPixelsComeOutInPixelOrder() {
+        var snake = block(.rowsZigZag)
+        for index in 0..<8 {
+            let cell = snake.sequence[index]
+            snake.setOffset(1 + index * 3, column: cell % 4, row: cell / 4)
+        }
+        let pixels = DisguisePixelMap.pixels(
+            placements: DisguisePixelMap.placements(addresses: [1], block: snake),
+            block: snake)
+
+        XCTAssertEqual(pixels.map(\.channel), [1, 4, 7, 10, 13, 16, 19, 22])
+        // Pixel 5 sits under pixel 4, which is what snaking means.
+        XCTAssertEqual([pixels[3].x, pixels[3].y], [3, 0])
+        XCTAssertEqual([pixels[4].x, pixels[4].y], [3, 1])
+    }
+
+    /// The default is unchanged, which is what keeps the reference file
+    /// reproducing.
+    func testRowsIsTheDefault() {
+        XCTAssertEqual(DisguisePixelMap.Block(columns: 4, rows: 2).order, .rows)
+    }
+}
+
+/// Which corner the count starts from.
+final class PixelStartCornerTests: XCTestCase {
+
+    private func block(
+        _ start: DisguisePixelMap.PixelStart,
+        order: DisguisePixelMap.PixelOrder = .rows
+    ) -> DisguisePixelMap.Block {
+        DisguisePixelMap.Block(columns: 4, rows: 2, order: order, start: start)
+    }
+
+    func testTopLeftIsTheDefault() {
+        XCTAssertEqual(DisguisePixelMap.Block(columns: 4, rows: 2).start, .topLeft)
+        XCTAssertEqual(block(.topLeft).sequence, [0, 1, 2, 3, 4, 5, 6, 7])
+    }
+
+    func testTopRightCountsBackAlongEachRow() {
+        XCTAssertEqual(block(.topRight).sequence, [3, 2, 1, 0, 7, 6, 5, 4])
+    }
+
+    func testBottomLeftStartsOnTheLastRow() {
+        XCTAssertEqual(block(.bottomLeft).sequence, [4, 5, 6, 7, 0, 1, 2, 3])
+    }
+
+    func testBottomRightStartsInTheFarCorner() {
+        XCTAssertEqual(block(.bottomRight).sequence, [7, 6, 5, 4, 3, 2, 1, 0])
+    }
+
+    func testEveryCornerCountsEveryPixelOnce() {
+        for start in DisguisePixelMap.PixelStart.allCases {
+            for order in DisguisePixelMap.PixelOrder.allCases {
+                XCTAssertEqual(
+                    block(start, order: order).sequence.sorted(), Array(0..<8),
+                    "\(start.label), \(order.label)")
+            }
+        }
+    }
+
+    /// The reason the corner exists: turned 90°, a line counted from the
+    /// top left puts pixel 1 on the *right* of the screen. Starting from
+    /// the bottom left brings it back to the left.
+    func testTurnedNinetyDegreesTheBottomLeftPutsPixelOneOnTheLeft() {
+        func firstPixelX(_ start: DisguisePixelMap.PixelStart) -> Int {
+            var line = DisguisePixelMap.Block(columns: 16, rows: 2, start: start)
+            for index in 0..<line.cellCount {
+                let cell = line.sequence[index]
+                line.setOffset(1 + index * 3, column: cell % 16, row: cell / 16)
+            }
+            let pixels = DisguisePixelMap.pixels(
+                placements: DisguisePixelMap.placements(
+                    addresses: [1], block: line, rotation: .quarter),
+                block: line, rotation: .quarter)
+            return pixels[0].x
+        }
+
+        XCTAssertEqual(firstPixelX(.topLeft), 1, "on the right, as reported")
+        XCTAssertEqual(firstPixelX(.bottomLeft), 0, "and now on the left")
+    }
+}

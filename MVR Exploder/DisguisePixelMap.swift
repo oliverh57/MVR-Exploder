@@ -10,6 +10,72 @@ import Foundation
 /// per type.
 struct DisguisePixelMap {
 
+    /// Which way the pixels are counted inside one fixture.
+    ///
+    /// A fixture's first pixel is wherever its first channels are, and
+    /// that isn't always the top-left running right: plenty of tiles and
+    /// battens snake, and a line hung the other way up counts from the
+    /// other end. The order decides which cell is pixel 1, what the fill
+    /// counts along, and the order the rows come out in the CSV.
+    enum PixelOrder: String, CaseIterable, Identifiable, Equatable {
+        /// Left to right, every row the same way.
+        case rows
+        /// Left to right, then right to left — a snake.
+        case rowsZigZag
+        /// Top to bottom, every column the same way.
+        case columns
+        /// Top to bottom, then bottom to top.
+        case columnsZigZag
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .rows: return "Rows"
+            case .rowsZigZag: return "Rows, snaking"
+            case .columns: return "Columns"
+            case .columnsZigZag: return "Columns, snaking"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .rows: return "arrow.right"
+            case .rowsZigZag: return "arrow.turn.down.left"
+            case .columns: return "arrow.down"
+            case .columnsZigZag: return "arrow.turn.right.up"
+            }
+        }
+    }
+
+    /// Which corner pixel 1 is in.
+    ///
+    /// The order says rows or columns and whether they snake; this says
+    /// where the count starts. The two together cover a fixture hung the
+    /// other way up or fed from the far end — and, once the fixture is
+    /// turned, they are what puts pixel 1 on the left rather than the
+    /// right.
+    enum PixelStart: String, CaseIterable, Identifiable, Equatable {
+        case topLeft
+        case topRight
+        case bottomLeft
+        case bottomRight
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .topLeft: return "Top left"
+            case .topRight: return "Top right"
+            case .bottomLeft: return "Bottom left"
+            case .bottomRight: return "Bottom right"
+            }
+        }
+
+        var mirrorsColumns: Bool { self == .topRight || self == .bottomRight }
+        var mirrorsRows: Bool { self == .bottomLeft || self == .bottomRight }
+    }
+
     /// One fixture type's layout, in cells.
     ///
     /// A pixel line is 16 across and 2 high; offsets are counted from the
@@ -22,11 +88,58 @@ struct DisguisePixelMap {
         var rows: Int
         /// Row-major, `rows * columns` entries.
         var offsets: [Int?]
+        /// Which way the pixels are counted. Storage stays row-major
+        /// whatever this says — the order is about counting, not about
+        /// where a cell is.
+        var order: PixelOrder
+        /// The corner the count starts from.
+        var start: PixelStart
 
-        init(columns: Int, rows: Int, offsets: [Int?] = []) {
+        init(
+            columns: Int, rows: Int, offsets: [Int?] = [],
+            order: PixelOrder = .rows, start: PixelStart = .topLeft
+        ) {
             self.columns = max(1, columns)
             self.rows = max(1, rows)
             self.offsets = Self.resized(offsets, to: self.rows * self.columns)
+            self.order = order
+            self.start = start
+        }
+
+        /// Cell indices in the order the pixels are counted: `sequence[0]`
+        /// is the cell that holds pixel 1.
+        var sequence: [Int] {
+            // Walked from the top left, then folded over to start from
+            // whichever corner was asked for — the walk and the corner
+            // are separate questions, and mirroring is all the corner is.
+            func cell(_ column: Int, _ row: Int) -> Int {
+                let column = start.mirrorsColumns ? columns - 1 - column : column
+                let row = start.mirrorsRows ? rows - 1 - row : row
+                return row * columns + column
+            }
+
+            switch order {
+            case .rows, .rowsZigZag:
+                return (0..<rows).flatMap { row -> [Int] in
+                    let line = (0..<columns).map { cell($0, row) }
+                    return order == .rowsZigZag && row % 2 == 1 ? line.reversed() : line
+                }
+            case .columns, .columnsZigZag:
+                return (0..<columns).flatMap { column -> [Int] in
+                    let line = (0..<rows).map { cell(column, $0) }
+                    return order == .columnsZigZag && column % 2 == 1 ? line.reversed() : line
+                }
+            }
+        }
+
+        /// Where each cell falls in that count: `ranks[cell]` is 0 for the
+        /// cell holding pixel 1.
+        var ranks: [Int] {
+            var result = [Int](repeating: 0, count: cellCount)
+            for (rank, cell) in sequence.enumerated() where result.indices.contains(cell) {
+                result[cell] = rank
+            }
+            return result
         }
 
         var cellCount: Int { rows * columns }
@@ -69,9 +182,13 @@ struct DisguisePixelMap {
         /// painted over it would lose work on a slip.
         func suggestions(anchor: Int, value: Int, step: Int) -> [Int: Int] {
             guard offsets.indices.contains(anchor), step != 0 else { return [:] }
+            // Counted along the pixel order, so a snaking fixture's
+            // suggestions snake with it.
+            let ranks = self.ranks
+            let anchorRank = ranks[anchor]
             var result: [Int: Int] = [:]
             for index in offsets.indices where index != anchor && offsets[index] == nil {
-                let suggested = value + (index - anchor) * step
+                let suggested = value + (ranks[index] - anchorRank) * step
                 guard suggested >= 1 else { continue }
                 result[index] = suggested
             }
@@ -81,13 +198,14 @@ struct DisguisePixelMap {
         /// The gap the grid itself implies, from the last two cells filled
         /// in. One RGB pixel when there aren't two to compare.
         func inferredStep(fallback: Int = 3) -> Int {
-            let filled = offsets.enumerated().compactMap { index, value in
-                value.map { (index: index, value: $0) }
-            }
+            let ranks = self.ranks
+            let filled = offsets.enumerated()
+                .compactMap { index, value in value.map { (rank: ranks[index], value: $0) } }
+                .sorted { $0.rank < $1.rank }
             guard filled.count >= 2 else { return fallback }
             let last = filled[filled.count - 1]
             let previous = filled[filled.count - 2]
-            let span = last.index - previous.index
+            let span = last.rank - previous.rank
             guard span > 0 else { return fallback }
             let step = (last.value - previous.value) / span
             return step > 0 ? step : fallback
@@ -221,20 +339,21 @@ struct DisguisePixelMap {
         var pixels: [Pixel] = []
         pixels.reserveCapacity(placements.count * block.cellCount)
 
+        let sequence = block.sequence
         for placement in placements {
-            for row in 0..<block.rows {
-                for column in 0..<block.columns {
-                    guard let offset = block.offset(column: column, row: row) else { continue }
-                    let absolute = placement.address + offset - 1
-                    guard absolute >= 1 else { continue }
-                    let split = MVRFixture.universeAndChannel(fromAbsoluteAddress: absolute)
-                    let cell = position(column: column, row: row, block: block, rotation: rotation)
-                    pixels.append(Pixel(
-                        x: placement.originX + cell.x,
-                        y: placement.originY + cell.y,
-                        universe: split.universe,
-                        channel: split.channel))
-                }
+            for index in sequence {
+                let column = index % block.columns
+                let row = index / block.columns
+                guard let offset = block.offset(column: column, row: row) else { continue }
+                let absolute = placement.address + offset - 1
+                guard absolute >= 1 else { continue }
+                let split = MVRFixture.universeAndChannel(fromAbsoluteAddress: absolute)
+                let cell = position(column: column, row: row, block: block, rotation: rotation)
+                pixels.append(Pixel(
+                    x: placement.originX + cell.x,
+                    y: placement.originY + cell.y,
+                    universe: split.universe,
+                    channel: split.channel))
             }
         }
         // Fixture by fixture, each in its own reading order — which is
