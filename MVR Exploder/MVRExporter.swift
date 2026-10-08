@@ -412,6 +412,9 @@ enum MVRExporter {
                 let newElement = XMLElement(name: "FixtureID", stringValue: value)
                 fixture.addChild(newElement)
             }
+            // Same value in the numeric twin, or grandMA3 — which reads
+            // that one — imports the old FixtureID instead.
+            fixture.elements(forName: "FixtureIDNumeric").first?.stringValue = value
 
             unitNumberElement.detach()
         }

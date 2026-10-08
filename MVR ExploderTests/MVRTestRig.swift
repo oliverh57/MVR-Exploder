@@ -62,10 +62,12 @@ enum MVRTestRig {
         _ fixtures: [Fixture],
         layer: String = "Lighting",
         sceneObjects: [SceneObject] = [],
+        idElements: [String] = ["FixtureID"],
         file: StaticString = #filePath, line: UInt = #line
     ) throws -> URL {
         let url = temporaryDirectory().appendingPathComponent("\(UUID().uuidString).mvr")
-        let xml = sceneDescription(fixtures: fixtures, layer: layer, sceneObjects: sceneObjects)
+        let xml = sceneDescription(
+            fixtures: fixtures, layer: layer, sceneObjects: sceneObjects, idElements: idElements)
 
         let workDir = temporaryDirectory().appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
@@ -90,12 +92,12 @@ enum MVRTestRig {
     // MARK: - XML
 
     private static func sceneDescription(
-        fixtures: [Fixture], layer: String, sceneObjects: [SceneObject]
+        fixtures: [Fixture], layer: String, sceneObjects: [SceneObject], idElements: [String]
     ) -> String {
         let layerUUID = "11111111-2222-3333-4444-555555555555"
-        var children = fixtures.map(fixtureXML).joined(separator: "\n")
+        var children = fixtures.map { fixtureXML($0, idElements: idElements) }.joined(separator: "\n")
         for object in sceneObjects {
-            children += "\n" + sceneObjectXML(object)
+            children += "\n" + sceneObjectXML(object, idElements: idElements)
         }
 
         return """
@@ -114,8 +116,8 @@ enum MVRTestRig {
         """
     }
 
-    private static func sceneObjectXML(_ object: SceneObject) -> String {
-        let nested = object.fixtures.map(fixtureXML).joined(separator: "\n")
+    private static func sceneObjectXML(_ object: SceneObject, idElements: [String]) -> String {
+        let nested = object.fixtures.map { fixtureXML($0, idElements: idElements) }.joined(separator: "\n")
         return """
                   <SceneObject name="\(escaped(object.name))" uuid="\(object.uuid)">
                     <Matrix>{1.000000,0.000000,0.000000}{0.000000,1.000000,0.000000}{0.000000,0.000000,1.000000}{0.000000,0.000000,0.000000}</Matrix>
@@ -127,8 +129,13 @@ enum MVRTestRig {
         """
     }
 
-    private static func fixtureXML(_ fixture: Fixture) -> String {
-        let id = fixture.id.map { "\n            <FixtureID>\($0)</FixtureID>" } ?? ""
+    /// `idElements` names the elements the ID is written into: grandMA3
+    /// writes it to both `FixtureID` and `FixtureIDNumeric`, and older
+    /// exporters to `UnitNumber` instead.
+    private static func fixtureXML(_ fixture: Fixture, idElements: [String]) -> String {
+        let id = fixture.id.map { id in
+            idElements.map { "\n            <\($0)>\(id)</\($0)>" }.joined()
+        } ?? ""
         return """
                   <Fixture name="\(escaped(fixture.name))" uuid="\(fixture.uuid)">
                     <GDTFSpec>\(escaped(fixture.type)).gdtf</GDTFSpec>

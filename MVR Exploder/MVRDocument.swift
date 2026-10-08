@@ -86,7 +86,7 @@ final class MVRDocument: ObservableObject {
         var unitNumberHasData = false
 
         for case let element as XMLElement in fixtureNodes {
-            if !fixtureIDHasData, let value = element.elements(forName: "FixtureID").first?.stringValue.flatMap(Int.init), value != 0 {
+            if !fixtureIDHasData, let value = numericFixtureID(of: element), value != 0 {
                 fixtureIDHasData = true
             }
             if !unitNumberHasData, let value = element.elements(forName: "UnitNumber").first?.stringValue.flatMap(Int.init), value != 0 {
@@ -100,6 +100,15 @@ final class MVRDocument: ObservableObject {
         case (false, true): return .determined("UnitNumber")
         default: return .ambiguous
         }
+    }
+
+    /// A fixture's ID as a number. MVR 1.6 carries it twice: `<FixtureID>`,
+    /// a string, and `<FixtureIDNumeric>`, an integer — and grandMA3 writes
+    /// both. The string is preferred, the numeric one is the fallback for
+    /// files that only fill that in.
+    private static func numericFixtureID(of element: XMLElement) -> Int? {
+        element.elements(forName: "FixtureID").first?.stringValue.flatMap { Int($0) }
+            ?? element.elements(forName: "FixtureIDNumeric").first?.stringValue.flatMap { Int($0) }
     }
 
     func load(from url: URL, idFieldName: String) throws {
@@ -124,8 +133,9 @@ final class MVRDocument: ObservableObject {
             let uuid = element.attribute(forName: "uuid")?.stringValue ?? UUID().uuidString
             let name = element.attribute(forName: "name")?.stringValue ?? "-"
 
-            let fixtureIDText = element.elements(forName: idFieldName).first?.stringValue
-            let fixtureID = fixtureIDText.flatMap { Int($0) }
+            let fixtureID = idFieldName == "FixtureID"
+                ? Self.numericFixtureID(of: element)
+                : element.elements(forName: idFieldName).first?.stringValue.flatMap { Int($0) }
 
             let addressElement = element.elements(forName: "Addresses").first?
                 .elements(forName: "Address").first
@@ -211,12 +221,7 @@ final class MVRDocument: ObservableObject {
     func applyFixtureIDOffset(_ offset: Int) {
         for index in fixtures.indices {
             guard let current = fixtures[index].currentFixtureID else { continue }
-            let newID = current + offset
-            fixtures[index].currentFixtureID = newID
-
-            if let fixtureIDElement = fixtures[index].xmlElement.elements(forName: idFieldName).first {
-                fixtureIDElement.stringValue = String(newID)
-            }
+            writeFixtureID(current + offset, at: index)
         }
     }
 
@@ -324,9 +329,32 @@ final class MVRDocument: ObservableObject {
     /// another document into the fixture with the given stable `id`.
     func setFixtureID(_ newID: Int, forFixtureAtID id: String) {
         guard let index = fixtures.firstIndex(where: { $0.id == id }) else { return }
+        writeFixtureID(newID, at: index)
+    }
+
+    /// The one place a Fixture ID reaches the XML, so every edit path
+    /// writes it the same way.
+    ///
+    /// `<FixtureIDNumeric>` is kept in step with `<FixtureID>`: grandMA3
+    /// writes both and reads the numeric one back, so updating only the
+    /// string meant an offset file still imported into MA at its old IDs.
+    /// It's only updated where the file already has it — UnitNumber files
+    /// get theirs synced on export, once UnitNumber becomes the FixtureID.
+    ///
+    /// A missing ID element is created rather than skipped, or the table
+    /// would show an ID that export silently never writes.
+    private func writeFixtureID(_ newID: Int, at index: Int) {
         fixtures[index].currentFixtureID = newID
-        if let element = fixtures[index].xmlElement.elements(forName: idFieldName).first {
-            element.stringValue = String(newID)
+        let element = fixtures[index].xmlElement
+        let value = String(newID)
+
+        if let idElement = element.elements(forName: idFieldName).first {
+            idElement.stringValue = value
+        } else {
+            element.addChild(XMLElement(name: idFieldName, stringValue: value))
+        }
+        if idFieldName == "FixtureID", let numeric = element.elements(forName: "FixtureIDNumeric").first {
+            numeric.stringValue = value
         }
     }
 
