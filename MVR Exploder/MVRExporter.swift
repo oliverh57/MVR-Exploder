@@ -42,6 +42,7 @@ enum MVRExporter {
         if document.idFieldName == "UnitNumber" {
             normalizeUnitNumberToFixtureID(in: exportXML)
         }
+        syncFixtureIDNumeric(in: exportXML)
         if !options.includeSceneGeometry {
             removeNonFixtureSceneObjects(from: exportXML)
         }
@@ -414,6 +415,21 @@ enum MVRExporter {
             }
 
             unitNumberElement.detach()
+        }
+    }
+
+    /// MVR 1.6 files carry the ID twice, in <FixtureID> and
+    /// <FixtureIDNumeric>, and grandMA3 imports the numeric one. Edits only
+    /// touch <FixtureID>, so the numeric copy is brought in line here —
+    /// otherwise MA3 shows the original IDs.
+    private static func syncFixtureIDNumeric(in document: XMLDocument) {
+        let fixtureNodes = (try? document.nodes(forXPath: "//Fixture")) ?? []
+        for case let fixture as XMLElement in fixtureNodes {
+            guard let numeric = fixture.elements(forName: "FixtureIDNumeric").first,
+                  let value = fixture.elements(forName: "FixtureID").first?.stringValue
+                      .flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) })
+            else { continue }
+            numeric.stringValue = String(value)
         }
     }
 
