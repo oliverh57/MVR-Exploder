@@ -66,6 +66,11 @@ final class MVRDocument: ObservableObject {
     /// What a tool asks about before throwing a visit's work away.
     @Published private(set) var editCount = 0
 
+    /// What has been done to the file since it was opened, in the order it
+    /// was first done — "AutoID", "IDOffset" — so an export can be named
+    /// after it.
+    @Published private(set) var editTags: [String] = []
+
     /// True while a load or clear replaces the fixtures wholesale, which
     /// is not an edit.
     private var isReplacingContents = false
@@ -252,6 +257,7 @@ final class MVRDocument: ObservableObject {
         self.fixtures = parsedFixtures
         isReplacingContents = false
         hasUnexportedChanges = false
+        editTags = []
         refreshAvailableLayers()
         undoManager?.removeAllActions(withTarget: self)
         loadGeneration += 1
@@ -269,6 +275,11 @@ final class MVRDocument: ObservableObject {
     private func noteEdit() {
         hasUnexportedChanges = true
         editCount += 1
+    }
+
+    /// Adds to `editTags`, once.
+    func recordEdit(_ tag: String) {
+        if !editTags.contains(tag) { editTags.append(tag) }
     }
 
     // MARK: - Drafts
@@ -317,12 +328,18 @@ final class MVRDocument: ObservableObject {
         draft.fixtures = draftFixtures
         draft.isReplacingContents = false
         draft.hasUnexportedChanges = hasUnexportedChanges
+        draft.editTags = editTags
         return draft
     }
 
     /// Takes a draft's work as this document's own: a tool's Apply.
-    func adopt(_ draft: MVRDocument) {
+    /// `tag` names the tool's work for the export, unless the draft
+    /// already recorded something more specific, like "IDOffset".
+    func adopt(_ draft: MVRDocument, as tag: String) {
         guard draft.editCount > 0 else { return }
+        let ownTags = editTags
+        editTags = draft.editTags
+        if editTags == ownTags { recordEdit(tag) }
         xmlDocument = draft.xmlDocument
         injectedGDTFFiles = draft.injectedGDTFFiles
         groupNames = draft.groupNames
@@ -345,6 +362,7 @@ final class MVRDocument: ObservableObject {
         fixtures = []
         isReplacingContents = false
         hasUnexportedChanges = false
+        editTags = []
         fileName = ""
         originalFileURL = nil
         xmlDocument = nil
@@ -376,6 +394,7 @@ final class MVRDocument: ObservableObject {
             if let current = fixture.currentFixtureID { newIDs[fixture.id] = current + offset }
         }
         setFixtureIDs(newIDs)
+        recordEdit("IDOffset")
     }
 
     /// Adds `offset` universes' worth (512 channels each) to every fixture's
@@ -388,6 +407,7 @@ final class MVRDocument: ObservableObject {
             }
         }
         changeAddresses(newAddresses)
+        recordEdit("UniverseOffset")
     }
 
     /// Assigns a fresh, random UUID to every fixture and writes it back into
@@ -396,6 +416,7 @@ final class MVRDocument: ObservableObject {
         var newUUIDs: [String: String] = [:]
         for fixture in fixtures { newUUIDs[fixture.id] = UUID().uuidString.lowercased() }
         changeUUIDs(newUUIDs)
+        recordEdit("NewUUIDs")
     }
 
     /// Reverts every fixture back to the values it had when the file was
@@ -588,6 +609,7 @@ final class MVRDocument: ObservableObject {
     /// detaching each from the underlying XML too.
     func removeFixtures(matching criteria: MVRFixture.UnpatchedCriteria) {
         deleteFixtures(withIDs: Set(fixtures.filter { $0.isUnpatched(by: criteria) }.map(\.id)))
+        recordEdit("Unpatched")
     }
 
     /// Used by Compare mode to copy a name from a matched fixture in

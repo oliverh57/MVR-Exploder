@@ -13,6 +13,25 @@ struct MVRExportOptions {
     var assignLayersByFixtureType: Bool
     var replaceAllWithDummyGDTFs: Bool
     var cleanupEmptyClassesAndLayers: Bool
+
+    /// What these options do to the file, for its name alongside the
+    /// document's own edit tags.
+    var fileNameTags: [String] {
+        var tags: [String] = []
+        if !includeSceneGeometry { tags.append("GeomCleanup") }
+        if cleanupEmptyClassesAndLayers { tags.append("LayerCleanup") }
+        if assignLayersByFixtureType { tags.append("LayersByType") }
+        if replaceAllWithDummyGDTFs { tags.append("DummyGDTF") }
+        return tags
+    }
+
+    /// The suggested name for exporting `fileName` after `editTags`:
+    /// "Show_AutoID_IDOffset". "_edited" when nothing has been done.
+    func exportName(for fileName: String, editTags: [String]) -> String {
+        let base = (fileName as NSString).deletingPathExtension
+        let tags = editTags + fileNameTags
+        return "\(base)_\(tags.isEmpty ? "edited" : tags.joined(separator: "_"))"
+    }
 }
 
 enum MVRExporter {

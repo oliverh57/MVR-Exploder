@@ -22,17 +22,17 @@ struct ContentView: View {
                 case .none:
                     ToolsView(document: document, onOpen: { open($0) })
                 case .singleEdit:
-                    editing("Single Edit") { draft, close in
+                    editing("Single Edit", tag: "Edit") { draft, close in
                         SingleEditView(document: draft, reveal: reveal, onBack: close)
                     }
                 case .smartAutoID:
                     SmartAutoIDView(document: document, onBack: backToTools)
                 case .modeSwap:
-                    editing("Mode Swap") { draft, close in
+                    editing("Mode Swap", tag: "ModeSwap") { draft, close in
                         ModeSwapView(document: draft, onBack: close)
                     }
                 case .compare:
-                    editing("Compare & Merge") { draft, close in
+                    editing("Compare & Merge", tag: "Merge") { draft, close in
                         CompareView(leftDocument: draft, onBack: close)
                     }
                 case .disguiseCSV:
@@ -40,16 +40,16 @@ struct ContentView: View {
                     // nothing to apply; it asks before dropping its layout.
                     DisguiseCSVView(document: document, onBack: backToTools)
                 case .viewer3D:
-                    editing("3D Viewer") { draft, close in
+                    editing("3D Viewer", tag: "Edit") { draft, close in
                         Viewer3DScreen(document: draft, onClose: close)
                             .equatable()
                     }
                 case .fixtureIDMap:
-                    editing("Fixture ID Map") { draft, close in
+                    editing("Fixture ID Map", tag: "IDMap") { draft, close in
                         FixtureIDMapView(document: draft, onClose: close)
                     }
                 case .dmxUniverseMap:
-                    editing("DMX Universe Map") { draft, close in
+                    editing("DMX Universe Map", tag: "Repatch") { draft, close in
                         DMXUniverseMapView(document: draft, onClose: close)
                     }
                 }
@@ -74,11 +74,13 @@ struct ContentView: View {
 
     /// A tool that edits, on its own copy of the file — a new one each
     /// visit, since going back to the tools takes the tool off screen.
+    /// `tag` is what the tool's work adds to the exported file's name.
     private func editing<Tool: View>(
         _ name: String,
+        tag: String,
         @ViewBuilder tool: @escaping (MVRDocument, @escaping () -> Void) -> Tool
     ) -> some View {
-        EditingTool(document: document, name: name, onClose: backToTools, tool: tool)
+        EditingTool(document: document, name: name, tag: tag, onClose: backToTools, tool: tool)
     }
 
     private func open(_ tool: AppMode) {
@@ -150,6 +152,7 @@ private struct Viewer3DScreen: View, Equatable {
 private struct EditingTool<Tool: View>: View {
     @ObservedObject var document: MVRDocument
     let name: String
+    let tag: String
     let onClose: () -> Void
     @ViewBuilder let tool: (MVRDocument, @escaping () -> Void) -> Tool
 
@@ -163,7 +166,7 @@ private struct EditingTool<Tool: View>: View {
                 DraftScreen(
                     draft: draft, name: name,
                     onApply: {
-                        document.adopt(draft)
+                        document.adopt(draft, as: tag)
                         onClose()
                     },
                     onCancel: onClose,

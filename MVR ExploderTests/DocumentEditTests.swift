@@ -110,7 +110,7 @@ final class DocumentEditTests: XCTestCase {
         XCTAssertEqual(untouched.fixtures.count, 3, "the file's XML wasn't touched either")
         XCTAssertFalse(untouched.fixtures.contains { $0.name == "Renamed" })
 
-        document.adopt(draft)
+        document.adopt(draft, as: "Edit")
 
         XCTAssertEqual(document.fixtures.count, 2)
         XCTAssertEqual(document.fixtures.first { $0.id == first }?.name, "Renamed", "same ids")
@@ -129,7 +129,7 @@ final class DocumentEditTests: XCTestCase {
 
         XCTAssertEqual(document.fixtures[0].currentAddress, 1)
         XCTAssertEqual(try exportAndReopen(document).fixtures[0].currentAddress, 1)
-        document.adopt(draft)
+        document.adopt(draft, as: "Edit")
         XCTAssertEqual(try exportAndReopen(document).fixtures[0].currentAddress, 600)
     }
 
@@ -139,9 +139,48 @@ final class DocumentEditTests: XCTestCase {
         let draft = try XCTUnwrap(made)
         XCTAssertEqual(draft.editCount, 0)
 
-        document.adopt(draft)
+        document.adopt(draft, as: "Edit")
 
         XCTAssertFalse(document.hasUnexportedChanges)
+    }
+
+    // MARK: - Export name
+
+    private let plainExport = MVRExportOptions(
+        includeSceneGeometry: true, assignLayersByFixtureType: false,
+        replaceAllWithDummyGDTFs: false, cleanupEmptyClassesAndLayers: false)
+
+    /// The exported file is named after what was done to it, in order.
+    func testTheExportIsNamedAfterWhatWasDone() async throws {
+        let (document, _) = try open(MVRTestRig.bar("Spot", count: 2, y: 0, idsFrom: 1))
+
+        let session = AutoIDSession(fixtures: document.fixtures)
+        session.apply(to: document)
+
+        let made = await document.makeDraft()
+        let draft = try XCTUnwrap(made)
+        draft.applyFixtureIDOffset(100)
+        document.adopt(draft, as: "Edit")
+
+        XCTAssertEqual(plainExport.exportName(for: document.fileName, editTags: document.editTags),
+                       "\((document.fileName as NSString).deletingPathExtension)_AutoID_IDOffset")
+    }
+
+    /// A tool whose work has no name of its own is named after the tool.
+    func testAToolsTagIsUsedWhenItRecordedNothingMoreSpecific() async throws {
+        let (document, _) = try open(MVRTestRig.bar("Spot", count: 2, y: 0, idsFrom: 1))
+        let made = await document.makeDraft()
+        let draft = try XCTUnwrap(made)
+        draft.setName("Renamed", forFixtureAtID: document.fixtures[0].id)
+        document.adopt(draft, as: "ModeSwap")
+        XCTAssertEqual(document.editTags, ["ModeSwap"])
+    }
+
+    func testExportOptionsAddToTheName() {
+        var options = plainExport
+        XCTAssertEqual(options.exportName(for: "Show.mvr", editTags: []), "Show_edited")
+        options.includeSceneGeometry = false
+        XCTAssertEqual(options.exportName(for: "Show.mvr", editTags: ["AutoID"]), "Show_AutoID_GeomCleanup")
     }
 
     // MARK: - Undo

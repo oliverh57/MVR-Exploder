@@ -1045,6 +1045,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
         // Written into <UserData> on export, so re-opening the file
         // resumes this run instead of starting it over.
         document.setAutoIDSession(hasCorrections ? storedSession : nil)
+        document.recordEdit("AutoID")
     }
 }
 

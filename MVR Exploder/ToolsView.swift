@@ -287,20 +287,21 @@ struct MVRExportSheet: View {
     }
 
     private func export() {
-        let panel = NSSavePanel()
-        let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.prepareForExport(named: "\(baseName)_edited", fileExtension: "mvr")
-        guard panel.runModal() == .OK, let chosen = panel.url else {
-            onFinish(.cancelled)
-            return
-        }
-        let url = chosen.ensuringPathExtension("mvr")
-
         let options = MVRExportOptions(
             includeSceneGeometry: includeSceneGeometry,
             assignLayersByFixtureType: assignLayersByFixtureType,
             replaceAllWithDummyGDTFs: replaceAllWithDummyGDTFs,
             cleanupEmptyClassesAndLayers: cleanupEmptyClassesAndLayers)
+
+        let panel = NSSavePanel()
+        panel.prepareForExport(
+            named: options.exportName(for: document.fileName, editTags: document.editTags),
+            fileExtension: "mvr")
+        guard panel.runModal() == .OK, let chosen = panel.url else {
+            onFinish(.cancelled)
+            return
+        }
+        let url = chosen.ensuringPathExtension("mvr")
 
         do {
             try MVRExporter.export(document, to: url, options: options)
