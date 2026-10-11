@@ -80,26 +80,46 @@ struct AutoIDTolerance: Codable, Equatable {
 /// Spare IDs left in the numbering, so there is room to add fixtures
 /// later without renumbering everything after them.
 ///
-/// Two independent gaps because they answer different questions. A gap
-/// between groups leaves room to hang another two fixtures on a truss; a
-/// gap between fixtures leaves room to slot one in *between* two that are
-/// already there. A rig that pixel-maps by position wants the second; most
-/// shows want only the first, and plenty want neither — hence a tickbox on
-/// each rather than a number that has to be set to zero to mean "off".
+/// Two independent settings because they answer different questions.
+/// Starting groups on round numbers leaves room at the end of each truss
+/// and makes every group of a type start at the same point in its block —
+/// 101, 111, 121 — so an ID says which truss it's on. A gap between
+/// fixtures leaves room to slot one in *between* two that are already
+/// there. A rig that pixel-maps by position wants the second; most shows
+/// want only the first, and plenty want neither.
 struct AutoIDGaps: Codable, Equatable {
+    /// Each group of a type starts on the next multiple of one step — the
+    /// smallest of 10, 20, 50, 100, 200… its biggest group fits in.
     var betweenGroups = false
-    /// Spare IDs left after each group before the next one starts.
-    var groupGap = 10
     var betweenFixtures = false
     /// Spare IDs left after each fixture before the next one.
     var fixtureGap = 1
 
-    var groupSpacing: Int { betweenGroups ? max(0, groupGap) : 0 }
     /// How much each fixture advances the count. One more than the gap:
     /// a gap of 1 numbers 101, 103, 105.
     var fixtureStep: Int { betweenFixtures ? max(1, fixtureGap + 1) : 1 }
 
-    var isActive: Bool { groupSpacing > 0 || fixtureStep > 1 }
+    /// The distance between the starts of one type's groups, given the
+    /// size of each; nil when groups follow straight on from each other.
+    func groupStride(groupSizes: [Int]) -> Int? {
+        guard betweenGroups else { return nil }
+        let widest = groupSizes.map { ($0 - 1) * fixtureStep + 1 }.max() ?? 1
+        var magnitude = 10
+        while true {
+            for stride in [magnitude, magnitude * 2, magnitude * 5] where stride >= widest {
+                return stride
+            }
+            magnitude *= 10
+        }
+    }
+
+    /// `next` moved up to the first group start at or after it: `typeStart`
+    /// plus a whole number of strides.
+    static func groupStart(atLeast next: Int, typeStart: Int, stride: Int) -> Int {
+        let offset = next - typeStart
+        let strides = offset > 0 ? (offset + stride - 1) / stride : -(-offset / stride)
+        return typeStart + strides * stride
+    }
 }
 
 /// Settings for one auto-ID run.
@@ -389,7 +409,6 @@ enum MVRAutoID {
         }
 
         let step = options.gaps.fixtureStep
-        let groupGap = options.gaps.groupSpacing
 
         for placement in allocate(pending, options: options) {
             let entry = placement.type
@@ -398,6 +417,8 @@ enum MVRAutoID {
             // the following group has to start clear of.
             var next = placement.start
             var groupIDs: [[String]] = []
+            let stride = options.gaps.groupStride(
+                groupSizes: entry.clusters.map(\.count) + [entry.trailing.count])
 
             /// Numbers one group and leaves `next` one past its last ID.
             func number(_ members: [MVRFixture], groupIndex: Int) {
@@ -406,8 +427,9 @@ enum MVRAutoID {
                 // on from wherever that leaves off.
                 if let pinned = options.groupStartingID[Set(members.map(\.id))] {
                     next = max(1, pinned)
-                } else if groupIndex > 0 {
-                    next += groupGap
+                } else if groupIndex > 0, let stride {
+                    next = AutoIDGaps.groupStart(
+                        atLeast: next, typeStart: placement.start, stride: stride)
                 }
                 groupIDs.append(members.map(\.id))
                 var id = next
@@ -1937,9 +1959,12 @@ enum MVRAutoID {
         let sizes = groupSizes.filter { $0 > 0 }
         guard !sizes.isEmpty else { return 0 }
         let step = gaps.fixtureStep
+        let stride = gaps.groupStride(groupSizes: sizes)
         var span = 0
         for (index, count) in sizes.enumerated() {
-            if index > 0 { span += gaps.groupSpacing }
+            if index > 0, let stride {
+                span = AutoIDGaps.groupStart(atLeast: span, typeStart: 0, stride: stride)
+            }
             span += (count - 1) * step + 1
         }
         return span

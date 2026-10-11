@@ -21,7 +21,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         session.startingID = 501
         session.gaps = AutoIDGaps(
-            betweenGroups: true, groupGap: 10, betweenFixtures: true, fixtureGap: 1)
+            betweenGroups: true, betweenFixtures: true, fixtureGap: 1)
         session.merge(groupIndices: [0, 1], in: spec)
         session.setName("Front Truss", forGroup: 0, in: spec)
         session.setOrdering(.zigZagRows, forGroup: 0, in: spec)
@@ -35,7 +35,7 @@ final class SessionPersistenceTests: XCTestCase {
 
         XCTAssertTrue(resumed.session.restoredFromFile)
         XCTAssertEqual(resumed.session.startingID, 501)
-        XCTAssertEqual(resumed.session.gaps.groupGap, 10)
+        XCTAssertTrue(resumed.session.gaps.betweenGroups)
         XCTAssertTrue(resumed.session.gaps.betweenFixtures)
 
         let spec2 = resumed.session.displayTypes[0]

@@ -28,17 +28,47 @@ final class AutoIDNumberingTests: XCTestCase {
     func testGapBetweenFixturesLeavesSpareIDs() throws {
         let session = try makeSession(MVRTestRig.bar("Spot", count: 4, y: 0))
         session.gaps = AutoIDGaps(
-            betweenGroups: false, groupGap: 10, betweenFixtures: true, fixtureGap: 1)
+            betweenGroups: false, betweenFixtures: true, fixtureGap: 1)
         XCTAssertEqual(ids(session), [101, 103, 105, 107])
     }
 
-    func testGapBetweenGroupsLeavesSpareIDs() throws {
+    func testGroupsStartOnRoundNumbers() throws {
         let session = try makeSession(
             MVRTestRig.bar("Spot", count: 3, y: 0) + MVRTestRig.bar("Spot", count: 3, y: 5000))
         session.gaps = AutoIDGaps(
-            betweenGroups: true, groupGap: 10, betweenFixtures: false, fixtureGap: 1)
-        // 101–103, ten spare, then 114.
-        XCTAssertEqual(ids(session), [101, 102, 103, 114, 115, 116])
+            betweenGroups: true, betweenFixtures: false, fixtureGap: 1)
+        XCTAssertEqual(ids(session), [101, 102, 103, 111, 112, 113])
+    }
+
+    /// The step is the type's biggest group rounded up to 10, 20, 50, 100…
+    /// and every group of the type uses it, small ones included.
+    func testTheStepFitsTheBiggestGroup() throws {
+        let session = try makeSession(
+            MVRTestRig.bar("Spot", count: 12, y: 0) + MVRTestRig.bar("Spot", count: 3, y: 5000))
+        session.gaps = AutoIDGaps(
+            betweenGroups: true, betweenFixtures: false, fixtureGap: 1)
+        // Steps of 20 whichever bar is numbered first.
+        let twelveFirst = Array(101...112) + Array(121...123)
+        let threeFirst = Array(101...103) + Array(121...132)
+        XCTAssertTrue([twelveFirst, threeFirst].contains(ids(session)), "\(ids(session))")
+    }
+
+    func testStrideLadder() {
+        let gaps = AutoIDGaps(betweenGroups: true, betweenFixtures: false, fixtureGap: 1)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [7, 8, 6]), 10)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [10]), 10)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [11, 4]), 20)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [30, 24]), 50)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [51]), 100)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [120]), 200)
+        XCTAssertNil(AutoIDGaps().groupStride(groupSizes: [8]))
+    }
+
+    /// With a gap between fixtures, a group's width is what it spans, not
+    /// how many fixtures it has: 6 fixtures at a step of 2 span 11 IDs.
+    func testTheStepAllowsForTheGapBetweenFixtures() {
+        let gaps = AutoIDGaps(betweenGroups: true, betweenFixtures: true, fixtureGap: 1)
+        XCTAssertEqual(gaps.groupStride(groupSizes: [6]), 20)
     }
 
     func testGapsOffChangeNothing() throws {
@@ -49,7 +79,7 @@ final class AutoIDNumberingTests: XCTestCase {
 
         let session = try makeSession(fixtures)
         session.gaps = AutoIDGaps(
-            betweenGroups: false, groupGap: 25, betweenFixtures: false, fixtureGap: 4)
+            betweenGroups: false, betweenFixtures: false, fixtureGap: 4)
         XCTAssertEqual(ids(session), expected)
     }
 
@@ -57,7 +87,7 @@ final class AutoIDNumberingTests: XCTestCase {
         let session = try makeSession(
             MVRTestRig.bar("Spot", count: 60, y: 0) + MVRTestRig.bar("Wash", count: 4, y: 5000))
         session.gaps = AutoIDGaps(
-            betweenGroups: false, groupGap: 10, betweenFixtures: true, fixtureGap: 1)
+            betweenGroups: false, betweenFixtures: true, fixtureGap: 1)
 
         let blocks = session.plan.types.map { ($0.firstID, $0.lastID) }.sorted { $0.0 < $1.0 }
         XCTAssertLessThan(blocks[0].1, blocks[1].0,

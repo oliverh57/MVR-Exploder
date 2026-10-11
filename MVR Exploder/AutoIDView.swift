@@ -201,13 +201,14 @@ struct AutoIDView: View {
     /// The two are separate tickboxes rather than one setting because they
     /// solve different problems: room at the end of a truss, and room
     /// between two fixtures already on it. Most shows want the first only.
+    /// The first has no number: the step is whatever round number the
+    /// type's biggest group fits in.
     private var gapControls: some View {
         HStack(spacing: 10) {
-            gapControl(
-                title: "Gap between groups",
-                isOn: $session.gaps.betweenGroups,
-                value: $session.gaps.groupGap,
-                help: "Spare IDs after each group, for fixtures added later.")
+            Toggle("Start groups on round numbers", isOn: $session.gaps.betweenGroups)
+                .toggleStyle(.checkbox)
+                .help("Every group of a type starts the same distance apart — 10, 20, 50, 100… "
+                    + "whichever its biggest group fits in. Groups of up to 10 give 101, 111, 121.")
             gapControl(
                 title: "Gap between fixtures",
                 isOn: $session.gaps.betweenFixtures,
