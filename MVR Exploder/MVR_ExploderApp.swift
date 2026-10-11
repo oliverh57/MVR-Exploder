@@ -31,6 +31,11 @@ struct MVR_ExploderApp: App {
                 .onChange(of: appearanceModeRaw) { _, _ in applyAppearance() }
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    Task { await Updater.shared.check(userInitiated: true) }
+                }
+            }
             CommandGroup(after: .toolbar) {
                 Picker("Appearance", selection: $appearanceModeRaw) {
                     ForEach(AppearanceMode.allCases) { mode in
@@ -65,6 +70,12 @@ struct MVR_ExploderApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var document: MVRDocument?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Not when hosting unit tests: an update alert would stall the run.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        Task { await Updater.shared.check(userInitiated: false) }
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let document, document.isLoaded, document.hasUnexportedChanges else {
