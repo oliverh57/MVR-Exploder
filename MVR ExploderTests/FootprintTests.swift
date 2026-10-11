@@ -103,6 +103,41 @@ final class FootprintTests: XCTestCase {
         XCTAssertEqual(mode.channels, 16, "a break numbered 0 must not read as no channels")
     }
 
+    /// Pixel fixtures define one pixel's channels on a template and place
+    /// it with `<GeometryReference>`s, each saying where its copy starts.
+    /// Reading the template alone made a 117-channel Pixelline mode look
+    /// 5 channels wide.
+    func testEachPlacedPixelCountsAtItsOwnOffset() throws {
+        let document = try XMLDocument(xmlString: """
+        <FixtureType Name="Test">
+          <Geometries>
+            <Beam Name="Pixel"/>
+            <Geometry Name="Body">
+              <Geometry Name="Main">
+                <GeometryReference Name="P1" Geometry="Pixel"><Break DMXBreak="1" DMXOffset="4"/></GeometryReference>
+                <GeometryReference Name="P2" Geometry="Pixel"><Break DMXBreak="1" DMXOffset="7"/></GeometryReference>
+                <GeometryReference Name="P3" Geometry="Pixel"><Break DMXBreak="1" DMXOffset="10"/></GeometryReference>
+              </Geometry>
+            </Geometry>
+          </Geometries>
+          <DMXModes>
+            <DMXMode Name="12 channel" Geometry="Body">
+              <DMXChannels>
+                <DMXChannel DMXBreak="1" Offset="1" Geometry="Main"/>
+                <DMXChannel DMXBreak="1" Offset="2,3" Geometry="Main"/>
+                <DMXChannel DMXBreak="1" Offset="1" Geometry="Pixel"/>
+                <DMXChannel DMXBreak="1" Offset="2" Geometry="Pixel"/>
+                <DMXChannel DMXBreak="1" Offset="3" Geometry="Pixel"/>
+              </DMXChannels>
+            </DMXMode>
+          </DMXModes>
+        </FixtureType>
+        """, options: [])
+        // Three control channels, then the pixel at 4–6, 7–9 and 10–12:
+        // the last copy ends at its template offset 3, plus 10, less 1.
+        XCTAssertEqual(GDTFFootprintParser.modes(description: document)[0].channels, 12)
+    }
+
     func testNonsenseGivesNoModesRatherThanCrashing() {
         XCTAssertEqual(GDTFFootprintParser.modes(packageData: Data("not a zip".utf8)), [])
         XCTAssertEqual(GDTFFootprintParser.modes(packageData: Data()), [])

@@ -2,30 +2,31 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
-private enum DropSide {
-    case left
-    case right
-}
-
-private enum CopyDirection {
-    case aToB
-    case bToA
-}
-
+/// The open file (A) beside a second MVR (B), matched fixture by fixture.
+///
+/// A is the app's own document — every change made here, copied
+/// attributes and merged fixtures alike, is in it when you go back. B is
+/// loaded here for the comparison and is never written anywhere: it is a
+/// source to take from, so copying runs one way, B into A.
 struct CompareView: View {
+    @ObservedObject var leftDocument: MVRDocument
     let onBack: () -> Void
 
-    @StateObject private var leftDocument = MVRDocument()
     @StateObject private var rightDocument = MVRDocument()
 
-    @State private var leftError: String?
     @State private var rightError: String?
-    @State private var isLeftTargeted = false
     @State private var isRightTargeted = false
 
     // Drag-and-drop → ask which field holds the fixture ID before loading.
-    @State private var pendingDrop: (side: DropSide, url: URL)?
+    @State private var pendingFile: MVRSceneFile?
     @State private var showFieldChoiceDialog = false
+    @State private var isOpeningB = false
+    /// What the last merge did, for the bar along the bottom.
+    @State private var mergeMessage: String?
+    /// Rows changed from B while it's been open, by A's fixture — without
+    /// these a fixture just added from B reads "Same", like any other.
+    @State private var addedIDs: Set<String> = []
+    @State private var updatedIDs: Set<String> = []
 
     @State private var matchMode: MatchMode = .uuid
     @State private var showFileAColumns = true
@@ -36,7 +37,9 @@ struct CompareView: View {
     @State private var filterText = ""
 
     @State private var showCopyAttributesSheet = false
-    @State private var copyDirection: CopyDirection = .aToB
+    /// The rows the copy applies to — the selection it was opened from —
+    /// or nil for every matched row.
+    @State private var copyScope: Set<String>?
     @State private var copyID = true
     @State private var copyName = false
     @State private var copyPatch = false
@@ -45,26 +48,12 @@ struct CompareView: View {
     @State private var copy3D = false
     @State private var copyGDTF = false
 
-    @State private var showExportSheet = false
-    @State private var exportSide: DropSide?
-    @State private var includeSceneGeometry = true
-    @State private var assignLayersByFixtureType = false
-    @State private var replaceAllWithDummyGDTFs = false
-    @State private var cleanupEmptyClassesAndLayers = false
-
-    @State private var showRemoveUnpatchedConfirm = false
-
     private var comparisonRows: [MVRComparisonRow] {
         MVRComparator.compare(left: leftDocument.fixtures, right: rightDocument.fixtures, matchMode: matchMode)
     }
 
     private var matchedCount: Int {
         comparisonRows.filter { $0.status == .matched }.count
-    }
-
-    private func unpatchedCount(_ criteria: MVRFixture.UnpatchedCriteria) -> Int {
-        leftDocument.fixtures.filter { $0.isUnpatched(by: criteria) }.count
-            + rightDocument.fixtures.filter { $0.isUnpatched(by: criteria) }.count
     }
 
     var body: some View {
@@ -80,61 +69,42 @@ struct CompareView: View {
             bottomBar
         }
         .confirmationDialog(
-            "Which field holds each fixture's ID in this file?",
+            "Which field holds the fixture IDs?",
             isPresented: $showFieldChoiceDialog,
             titleVisibility: .visible
         ) {
             Button("FixtureID") { loadPendingDrop(idFieldName: "FixtureID") }
-            Button("UnitNumber") { loadPendingDrop(idFieldName: "UnitNumber") }
-            Button("Cancel", role: .cancel) { pendingDrop = nil }
+            Button("UnitNumber (Channel)") { loadPendingDrop(idFieldName: "UnitNumber") }
+            Button("Cancel", role: .cancel) { pendingFile = nil }
         } message: {
-            Text("Most MVR exporters use <FixtureID>, but some use <UnitNumber> instead.")
+            Text("This file has IDs in both. Most consoles use FixtureID; some use UnitNumber (Channel).")
         }
         .sheet(isPresented: $showCopyAttributesSheet) {
             copyAttributesSheet
         }
-        .sheet(isPresented: $showExportSheet) {
-            exportSheet
+        // An undo may have taken a copy back out, and there's no telling
+        // which: better no mark than one that's wrong. Added rows need no
+        // help — undone, the fixture leaves A and the row is B's again.
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange)) { _ in
+            updatedIDs = []
         }
     }
 
     // MARK: - Top bar / header
 
     private var topBar: some View {
-        HStack {
-            Button("← Mode") { onBack() }
-
-            Button("Clear Both") {
-                leftDocument.clear()
-                rightDocument.clear()
-                leftError = nil
-                rightError = nil
-            }
-            .disabled(leftDocument.fixtures.isEmpty && rightDocument.fixtures.isEmpty)
-
-            Spacer()
-        }
-        .padding(10)
+        ToolHeader("Compare & Merge", onBack: onBack)
     }
 
+    /// The two files either side of how they're matched, laid out as the
+    /// table is beneath them: A on the left, B on the right.
     private var fileHeaderBar: some View {
-        HStack(alignment: .top, spacing: 16) {
-            fileHeaderColumn(
-                label: "A",
-                fileName: leftDocument.fileName,
-                showColumns: $showFileAColumns,
-                error: leftError,
-                isTargeted: $isLeftTargeted,
-                side: .left
-            ) {
-                exportSide = .left
-                showExportSheet = true
-            }
-            .frame(maxWidth: .infinity)
+        HStack(spacing: 16) {
+            fileASide
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(spacing: 8) {
-                Text("Match File A → B by…")
-                    .font(.subheadline)
+            HStack(spacing: 8) {
+                Text("Match by")
                     .foregroundStyle(.secondary)
                 Picker("Match by", selection: $matchMode) {
                     ForEach(MatchMode.allCases) { mode in
@@ -143,76 +113,116 @@ struct CompareView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 200)
+                .fixedSize()
             }
-            .frame(width: 220)
-            .padding(.vertical, 12)
 
-            fileHeaderColumn(
-                label: "B",
-                fileName: rightDocument.fileName,
-                showColumns: $showFileBColumns,
-                error: rightError,
-                isTargeted: $isRightTargeted,
-                side: .right
-            ) {
-                exportSide = .right
-                showExportSheet = true
-            }
-            .frame(maxWidth: .infinity)
+            fileBSide
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
-    private func fileHeaderColumn(
-        label: String,
-        fileName: String,
-        showColumns: Binding<Bool>,
-        error: String?,
-        isTargeted: Binding<Bool>,
-        side: DropSide,
-        onExport: @escaping () -> Void
-    ) -> some View {
-        VStack(spacing: 8) {
-            Text(fileName.isEmpty ? "\(label): Drag .mvr file here" : "\(label): \(fileName)")
+    /// The open file, which is only ever changed by opening another from
+    /// the tools page.
+    private var fileASide: some View {
+        HStack(spacing: 10) {
+            fileBadge("A", color: .secondary)
+            fileTitle(leftDocument.fileName, note: "Your open file.")
+            Spacer(minLength: 0)
+            showToggle($showFileAColumns, file: "A")
+        }
+        .padding(4)
+    }
+
+    private var fileBSide: some View {
+        HStack(spacing: 10) {
+            fileBadge("B", color: .blue)
+            if isOpeningB {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Opening…")
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            } else if rightDocument.fileName.isEmpty {
+                chooseBZone
+            } else {
+                fileTitle(rightDocument.fileName, note: rightError ?? "For comparing. Not saved.",
+                          isError: rightError != nil)
+                Spacer(minLength: 0)
+                showToggle($showFileBColumns, file: "B")
+                Button("Replace…") { chooseFileB() }
+                Button("Clear", action: clearB)
+            }
+        }
+        .padding(4)
+        .background(isRightTargeted ? Color.accentColor.opacity(0.15) : .clear,
+                    in: RoundedRectangle(cornerRadius: 8))
+        .onDrop(of: [.fileURL], isTargeted: $isRightTargeted) { handleDrop(providers: $0) }
+    }
+
+    /// No B yet: the place to put one, for a click or a drop.
+    private var chooseBZone: some View {
+        Button(action: chooseFileB) {
+            HStack(spacing: 6) {
+                Image(systemName: rightError == nil ? "plus.circle" : "exclamationmark.triangle")
+                Text(rightError ?? "Choose an MVR to compare, or drop one here")
+                    .lineLimit(1)
+            }
+            .foregroundStyle(rightError == nil ? Color.accentColor : .red)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(rightError ?? "Choose the MVR to compare your file with.")
+    }
+
+    /// The letter the table's columns go by, in the colour of the file's
+    /// "only" status.
+    private func fileBadge(_ letter: String, color: Color) -> some View {
+        Text(letter)
+            .font(.headline)
+            .foregroundStyle(color)
+            .frame(width: 26, height: 26)
+            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func fileTitle(_ name: String, note: String, isError: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(name)
                 .font(.headline)
-                .multilineTextAlignment(.center)
-
-            HStack(spacing: 10) {
-                Toggle("Show", isOn: showColumns)
-                Button("Export Processed MVR \(label)", action: onExport)
-                    .disabled(fileName.isEmpty)
-                Button("Clear") {
-                    clearFile(side)
-                }
-                .disabled(fileName.isEmpty)
-            }
-
-            if let error {
-                Text(error).foregroundStyle(.red).font(.callout)
-                    .multilineTextAlignment(.center)
-            }
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(note)
+                .font(.caption)
+                .foregroundStyle(isError ? Color.red : .secondary)
+                .lineLimit(1)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .padding(.horizontal, 10)
-        .background(isTargeted.wrappedValue ? Color.accentColor.opacity(0.15) : Color.gray.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .onDrop(of: [.fileURL], isTargeted: isTargeted) { providers in
-            handleDrop(providers: providers, side: side)
-        }
+        .help(name)
     }
 
-    private func clearFile(_ side: DropSide) {
-        switch side {
-        case .left:
-            leftDocument.clear()
-            leftError = nil
-        case .right:
-            rightDocument.clear()
-            rightError = nil
+    /// Whether the file's columns, and the fixtures only it has, are in
+    /// the table.
+    private func showToggle(_ isShown: Binding<Bool>, file: String) -> some View {
+        Button {
+            isShown.wrappedValue.toggle()
+        } label: {
+            Image(systemName: isShown.wrappedValue ? "eye" : "eye.slash")
+                .frame(width: 20)
         }
+        .buttonStyle(.borderless)
+        .help(isShown.wrappedValue ? "Hide \(file) in the table." : "Show \(file) in the table.")
+    }
+
+    private func clearB() {
+        rightDocument.clear()
+        rightError = nil
+        mergeMessage = nil
+        addedIDs = []
+        updatedIDs = []
     }
 
     private var bottomBar: some View {
@@ -222,45 +232,28 @@ struct CompareView: View {
             Text("B: \(rightDocument.fixtures.count) fixtures")
                 .foregroundStyle(.secondary)
 
+            if let mergeMessage {
+                Text(mergeMessage)
+                    .foregroundStyle(.green)
+            } else if !rightDocument.fixtures.isEmpty {
+                Text("Right-click rows to copy fixtures into A.")
+                    .foregroundStyle(.secondary)
+            }
+
             Spacer()
 
-            Button("Copy Attributes…") {
+            Button("Copy Attributes from B…") {
+                copyScope = nil
                 showCopyAttributesSheet = true
             }
             .disabled(matchedCount == 0)
-
-            Button("Remove All Non-Patched Fixtures…") {
-                showRemoveUnpatchedConfirm = true
-            }
-            .disabled(leftDocument.fixtures.isEmpty && rightDocument.fixtures.isEmpty)
-            .confirmationDialog(
-                "What counts as a non-patched fixture?",
-                isPresented: $showRemoveUnpatchedConfirm,
-                titleVisibility: .visible
-            ) {
-                Button("No DMX Patch — \(unpatchedCount(.noDMXPatch)) fixture(s)", role: .destructive) {
-                    leftDocument.removeFixtures(matching: .noDMXPatch)
-                    rightDocument.removeFixtures(matching: .noDMXPatch)
-                }
-                Button("No Fixture ID — \(unpatchedCount(.noFixtureID)) fixture(s)", role: .destructive) {
-                    leftDocument.removeFixtures(matching: .noFixtureID)
-                    rightDocument.removeFixtures(matching: .noFixtureID)
-                }
-                Button("Both — \(unpatchedCount(.both)) fixture(s)", role: .destructive) {
-                    leftDocument.removeFixtures(matching: .both)
-                    rightDocument.removeFixtures(matching: .both)
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("No DMX Patch means Universe 1, Address 0. No Fixture ID means Fixture ID 0. Applies to both File A and File B.")
-            }
         }
         .padding(10)
     }
 
-    /// File A / File B with an arrow between them that flips on tap to
-    /// reverse the copy direction — avoids the old two-button picker
-    /// overflowing with long, similar-looking filenames.
+    /// B into A, said once: B is never saved, so there is no other way
+    /// round a copy could usefully go. A on the left and B on the right, as
+    /// they are on the screen behind it, with the arrow coming back across.
     private var directionSelector: some View {
         HStack(spacing: 14) {
             VStack(spacing: 2) {
@@ -274,17 +267,9 @@ struct CompareView: View {
             }
             .frame(maxWidth: .infinity)
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    copyDirection = (copyDirection == .aToB) ? .bToA : .aToB
-                }
-            } label: {
-                Image(systemName: "arrow.right.circle.fill")
-                    .font(.system(size: 22))
-                    .rotationEffect(.degrees(copyDirection == .aToB ? 0 : 180))
-            }
-            .buttonStyle(.plain)
-            .help("Click to reverse the copy direction")
+            Image(systemName: "arrow.left.circle.fill")
+                .font(.system(size: 22))
+                .foregroundStyle(Color.accentColor)
 
             VStack(spacing: 2) {
                 Text("B")
@@ -296,6 +281,13 @@ struct CompareView: View {
                     .truncationMode(.middle)
             }
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// The matched rows the copy will touch.
+    private var copyRows: [MVRComparisonRow] {
+        comparisonRows.filter { row in
+            row.status == .matched && (copyScope?.contains(row.id) ?? true)
         }
     }
 
@@ -317,7 +309,7 @@ struct CompareView: View {
 
             directionSelector
 
-            Text("Choose which fields to copy for the \(matchedCount) matched fixtures:")
+            Text("Copy from B to \(copyRows.count) matched fixture\(copyRows.count == 1 ? "" : "s"):")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -369,11 +361,12 @@ struct CompareView: View {
     }
 
     private func performAttributeCopy() {
-        let (source, destination) = copyDirection == .aToB ? (leftDocument, rightDocument) : (rightDocument, leftDocument)
+        let (source, destination) = (rightDocument, leftDocument)
+        let rows = copyRows
 
-        for row in comparisonRows where row.status == .matched {
+        for row in rows {
             guard let left = row.leftFixture, let right = row.rightFixture else { continue }
-            let (sourceFixture, destinationFixtureID) = copyDirection == .aToB ? (left, right.id) : (right, left.id)
+            let (sourceFixture, destinationFixtureID) = (right, left.id)
 
             if copyID {
                 switch matchMode {
@@ -404,6 +397,9 @@ struct CompareView: View {
                 destination.copyGDTF(from: source, sourceFixtureID: sourceFixture.id, toFixtureAtID: destinationFixtureID)
             }
         }
+
+        updatedIDs.formUnion(rows.compactMap { $0.leftFixture?.id })
+        mergeMessage = "Copied attributes from B to \(rows.count) fixture\(rows.count == 1 ? "" : "s") in A."
     }
 
     // MARK: - Comparison table
@@ -428,7 +424,26 @@ struct CompareView: View {
     }
 
     private var sortedComparisonRows: [MVRComparisonRow] {
-        filteredComparisonRows.sorted(using: sortOrder)
+        guard sortOrder.isEmpty else { return filteredComparisonRows.sorted(using: sortOrder) }
+        return keepingAddedRowsInPlace(filteredComparisonRows)
+    }
+
+    /// A fixture added from B is A's now, so the comparison lists it with
+    /// A's — at the end of them, a long way from the B row it was added
+    /// from. Unsorted, it stays where it was: among B's, in B's order.
+    private func keepingAddedRowsInPlace(_ rows: [MVRComparisonRow]) -> [MVRComparisonRow] {
+        guard !addedIDs.isEmpty else { return rows }
+        let orderInB = Dictionary(
+            rightDocument.fixtures.enumerated().map { ($1.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        func isFromB(_ row: MVRComparisonRow) -> Bool {
+            row.status == .rightOnly || addedIDs.contains(row.id)
+        }
+        func position(_ row: MVRComparisonRow) -> Int {
+            row.rightFixture.flatMap { orderInB[$0.id] } ?? .max
+        }
+        return rows.filter { !isFromB($0) }
+            + rows.filter(isFromB).sorted { position($0) < position($1) }
     }
 
     private var filterBar: some View {
@@ -469,102 +484,149 @@ struct CompareView: View {
 
     private var comparisonTable: some View {
         Table(sortedComparisonRows, selection: $selectedRowIDs, sortOrder: $sortOrder) {
-            TableColumn("Status") { row in
-                cell(row: row) {
-                    HStack(spacing: 6) {
-                        statusLabel(row.status)
-                        DeleteRowButton {
-                            if let left = row.leftFixture {
-                                leftDocument.deleteFixture(withID: left.id)
-                            }
-                            if let right = row.rightFixture {
-                                rightDocument.deleteFixture(withID: right.id)
-                            }
-                        }
+            TableColumn("") { row in
+                DeleteRowButton {
+                    if let left = row.leftFixture {
+                        leftDocument.deleteFixture(withID: left.id)
+                    }
+                    if let right = row.rightFixture {
+                        rightDocument.deleteFixture(withID: right.id)
                     }
                 }
             }
+            .width(28)
+
             if showFileAColumns {
                 TableColumn("A: Name", sortUsing: KeyPathComparator(\.leftNameSort)) { row in
-                    cell(row: row) {
-                        Text(row.leftFixture?.name ?? "-")
-                            .foregroundStyle(matches(row, \.name) ? .green : .primary)
+                    if row.status == .rightOnly {
+                        addToAButton(row)
+                    } else {
+                        value(row, row.leftFixture, \.name) { $0.name }
                     }
                 }
+                .width(min: 70, ideal: 100)
                 TableColumn("A: Fixture ID", sortUsing: KeyPathComparator(\.leftFixtureIDSort)) { row in
-                    cell(row: row) {
-                        Text(row.leftFixture?.currentFixtureID.map(String.init) ?? "-")
-                            .foregroundStyle(matches(row, \.currentFixtureID) ? .green : .primary)
-                    }
+                    value(row, row.leftFixture, \.currentFixtureID) { $0.currentFixtureID.map(String.init) ?? "" }
+                        .monospacedDigit()
                 }
+                .width(min: 44, ideal: 48, max: 90)
                 TableColumn("A: UUID", sortUsing: KeyPathComparator(\.leftUUIDSort)) { row in
-                    cell(row: row) {
-                        if let uuid = row.leftFixture?.currentUUID {
-                            UUIDCell(uuid: uuid, color: matches(row, \.currentUUID) ? .green : .gray)
-                        } else {
-                            Text("-")
-                        }
+                    if let fixture = row.leftFixture {
+                        uuidCell(row, fixture)
                     }
                 }
+                .width(min: 72, ideal: 76, max: 100)
                 TableColumn("A: Layer", sortUsing: KeyPathComparator(\.leftLayerSort)) { row in
-                    cell(row: row) {
-                        Text(row.leftFixture.map { $0.layerName.isEmpty ? "-" : $0.layerName } ?? "-")
-                            .foregroundStyle(matches(row, \.layerName) ? .green : .primary)
-                    }
+                    value(row, row.leftFixture, \.layerName) { $0.layerName }
                 }
+                .width(min: 50, ideal: 64)
                 TableColumn("A: Address", sortUsing: KeyPathComparator(\.leftAddressSort)) { row in
-                    cell(row: row, isBoundary: true) {
-                        Text(addressText(for: row.leftFixture))
-                            .foregroundStyle(matches(row, \.currentAddress) ? .green : .primary)
-                    }
+                    value(row, row.leftFixture, \.currentAddress, addressText)
+                        .monospacedDigit()
                 }
+                .width(min: 56, ideal: 56, max: 100)
             }
+
+            // Between the two files, so it reads as the verdict on the
+            // pair either side of it.
+            TableColumn("Status") { row in
+                statusBadge(row)
+                    .frame(maxWidth: .infinity)
+            }
+            .width(min: 72, ideal: 76, max: 96)
+
             if showFileBColumns {
                 TableColumn("B: Name", sortUsing: KeyPathComparator(\.rightNameSort)) { row in
-                    cell(row: row) {
-                        Text(row.rightFixture?.name ?? "-")
-                            .foregroundStyle(matches(row, \.name) ? .green : .primary)
-                    }
+                    value(row, row.rightFixture, \.name) { $0.name }
                 }
+                .width(min: 70, ideal: 100)
                 TableColumn("B: Fixture ID", sortUsing: KeyPathComparator(\.rightFixtureIDSort)) { row in
-                    cell(row: row) {
-                        Text(row.rightFixture?.currentFixtureID.map(String.init) ?? "-")
-                            .foregroundStyle(matches(row, \.currentFixtureID) ? .green : .primary)
-                    }
+                    value(row, row.rightFixture, \.currentFixtureID) { $0.currentFixtureID.map(String.init) ?? "" }
+                        .monospacedDigit()
                 }
+                .width(min: 44, ideal: 48, max: 90)
                 TableColumn("B: UUID", sortUsing: KeyPathComparator(\.rightUUIDSort)) { row in
-                    cell(row: row) {
-                        if let uuid = row.rightFixture?.currentUUID {
-                            UUIDCell(uuid: uuid, color: matches(row, \.currentUUID) ? .green : .gray)
-                        } else {
-                            Text("-")
-                        }
+                    if let fixture = row.rightFixture {
+                        uuidCell(row, fixture)
                     }
                 }
+                .width(min: 72, ideal: 76, max: 100)
                 TableColumn("B: Layer", sortUsing: KeyPathComparator(\.rightLayerSort)) { row in
-                    cell(row: row) {
-                        Text(row.rightFixture.map { $0.layerName.isEmpty ? "-" : $0.layerName } ?? "-")
-                            .foregroundStyle(matches(row, \.layerName) ? .green : .primary)
-                    }
+                    value(row, row.rightFixture, \.layerName) { $0.layerName }
                 }
+                .width(min: 50, ideal: 64)
                 TableColumn("B: Address", sortUsing: KeyPathComparator(\.rightAddressSort)) { row in
-                    cell(row: row) {
-                        Text(addressText(for: row.rightFixture))
-                            .foregroundStyle(matches(row, \.currentAddress) ? .green : .primary)
-                    }
+                    value(row, row.rightFixture, \.currentAddress, addressText)
+                        .monospacedDigit()
                 }
+                .width(min: 56, ideal: 56, max: 100)
             }
         }
         // Right-clicking inside a selection acts on all of it; right-clicking
         // an unselected row acts on that row alone. Deletes both sides of a
         // row, as the row's own delete button does.
         .contextMenu(forSelectionType: String.self) { ids in
+            let rows = comparisonRows.filter { ids.contains($0.id) }
+            let onlyInB = rows.filter { $0.status == .rightOnly }
+            let matched = rows.filter { $0.status == .matched }
+            let added = rows.filter { addedIDs.contains($0.id) }
+
+            // Only in B: the fixture itself comes across, whole.
+            if !onlyInB.isEmpty {
+                Button(onlyInB.count == 1
+                       ? "Add This Fixture to A"
+                       : "Add \(onlyInB.count) Fixtures to A") {
+                    addToA(onlyInB)
+                }
+            }
+            // In both: the usual copy, onto the fixture A already has.
+            if !matched.isEmpty {
+                Button(matched.count == 1
+                       ? "Copy Attributes from B…"
+                       : "Copy Attributes from B for \(matched.count)…") {
+                    copyScope = Set(matched.map(\.id))
+                    showCopyAttributesSheet = true
+                }
+            }
+            if !added.isEmpty {
+                Button(added.count == 1
+                       ? "Undo Add to A"
+                       : "Undo Adding \(added.count) Fixtures to A") {
+                    undoAdd(Set(added.map(\.id)))
+                }
+            }
+            if !onlyInB.isEmpty || !matched.isEmpty {
+                Divider()
+            }
             if !ids.isEmpty {
                 Button(ids.count == 1 ? "Delete Row" : "Delete \(ids.count) Rows", role: .destructive) {
                     deleteRows(withIDs: ids)
                 }
             }
         }
+    }
+
+    /// Brings fixtures that are only in B into A.
+    ///
+    /// Once they're in, the rows they came from match — on UUID by
+    /// definition, and on Fixture ID because the ID comes with them — so
+    /// the table itself shows the merge has happened.
+    private func addToA(_ rows: [MVRComparisonRow]) {
+        let incoming = rows.compactMap(\.rightFixture)
+        // Counted before the import: these are the ones it will have to
+        // give a new UUID, because A already uses theirs.
+        let inUse = Set(leftDocument.fixtures.map { $0.currentUUID.lowercased() })
+        let renamed = incoming.filter { inUse.contains($0.currentUUID.lowercased()) }.count
+        let added = leftDocument.importFixtures(withIDs: incoming.map(\.id), from: rightDocument)
+
+        var message = "Added \(added.count) fixture\(added.count == 1 ? "" : "s") to A."
+        if renamed > 0 {
+            message += " \(renamed) got new UUIDs to avoid clashes."
+        }
+        mergeMessage = message
+        addedIDs.formUnion(added)
+        // Picked out where they now sit, A's side filled in.
+        selectedRowIDs = Set(added)
     }
 
     private func deleteRows(withIDs ids: Set<String>) {
@@ -574,179 +636,221 @@ struct CompareView: View {
         selectedRowIDs.subtract(ids)
     }
 
-    /// True when the row is a match and both sides have equal values for
-    /// the given field — used to color individual matching fields green.
-    private func matches<T: Equatable>(_ row: MVRComparisonRow, _ keyPath: KeyPath<MVRFixture, T>) -> Bool {
-        guard row.status == .matched, let left = row.leftFixture, let right = row.rightFixture else { return false }
-        return left[keyPath: keyPath] == right[keyPath: keyPath]
+    /// True when both sides have a fixture and they disagree on the field —
+    /// what the comparison is for, so it's what gets the colour.
+    private func differs<T: Equatable>(_ row: MVRComparisonRow, _ keyPath: KeyPath<MVRFixture, T>) -> Bool {
+        guard let left = row.leftFixture, let right = row.rightFixture else { return false }
+        return left[keyPath: keyPath] != right[keyPath: keyPath]
     }
 
-    /// Wraps a column's content so it fills the cell width and picks up the
-    /// green "matched" highlight, keeping that logic in one place.
-    private func cell<Content: View>(row: MVRComparisonRow, isBoundary: Bool = false, @ViewBuilder content: () -> Content) -> some View {
-        content()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(row.status == .matched ? Color.green.opacity(0.08) : Color.clear)
-            .overlay(alignment: .trailing) {
-                if isBoundary {
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.35))
-                        .frame(width: 2)
-                }
-            }
+    /// Any of the columns shown disagreeing.
+    private func hasDifferences(_ row: MVRComparisonRow) -> Bool {
+        differs(row, \.name) || differs(row, \.currentFixtureID) || differs(row, \.currentUUID)
+            || differs(row, \.layerName) || differs(row, \.currentAddress)
     }
 
-    private func addressText(for fixture: MVRFixture?) -> String {
-        guard let fixture else { return "-" }
-        return "\(fixture.universe) / \(fixture.channel)"
-    }
-
-    private func statusLabel(_ status: ComparisonStatus) -> some View {
-        switch status {
-        case .matched:
-            return Text("Matched").foregroundStyle(.green)
-        case .leftOnly:
-            return Text("Only in A").foregroundStyle(.orange)
-        case .rightOnly:
-            return Text("Only in B").foregroundStyle(.orange)
+    /// One side's value. Blank where that side has no fixture — the status
+    /// says so once, rather than a dash in every column — and orange where
+    /// a matched pair disagrees.
+    @ViewBuilder
+    private func value<T: Equatable>(
+        _ row: MVRComparisonRow, _ fixture: MVRFixture?, _ keyPath: KeyPath<MVRFixture, T>,
+        _ text: (MVRFixture) -> String
+    ) -> some View {
+        if let fixture {
+            let shown = text(fixture)
+            Text(shown.isEmpty ? "—" : shown)
+                .foregroundStyle(differs(row, keyPath) ? Color.orange
+                                 : shown.isEmpty ? Color.secondary : Color.primary)
         }
     }
 
-    // MARK: - Loading
+    /// The first block of the UUID: enough to tell two apart at a glance,
+    /// with the whole thing a hover away.
+    private func uuidCell(_ row: MVRComparisonRow, _ fixture: MVRFixture) -> some View {
+        UUIDCell(uuid: fixture.currentUUID,
+                 color: differs(row, \.currentUUID) ? .orange : .secondary,
+                 label: String(fixture.currentUUID.prefix(8)))
+            .font(.body.monospaced())
+    }
 
-    private func handleDrop(providers: [NSItemProvider], side: DropSide) -> Bool {
+    private func addressText(for fixture: MVRFixture) -> String {
+        guard fixture.currentAddress != nil else { return "" }
+        return "\(fixture.universe) / \(fixture.channel)"
+    }
+
+    /// In the empty A side of a fixture only B has — where it will land.
+    /// Inside a selection it adds every B-only row selected, as
+    /// right-clicking there does; outside one, just its own row.
+    private func addToAButton(_ row: MVRComparisonRow) -> some View {
+        let isBulk = selectedRowIDs.contains(row.id)
+        let count = isBulk ? selectedOnlyInBCount : 1
+        return Button {
+            addToA(isBulk
+                   ? comparisonRows.filter { $0.status == .rightOnly && selectedRowIDs.contains($0.id) }
+                   : [row])
+        } label: {
+            // The words while they fit, the arrow alone once they don't:
+            // wrapped, they doubled the height of every B row.
+            ViewThatFits(in: .horizontal) {
+                Label(count > 1 ? "Add \(count) to A" : "Add to A", systemImage: "arrow.left.circle")
+                Image(systemName: "arrow.left.circle")
+            }
+            .lineLimit(1)
+        }
+        .buttonStyle(.borderless)
+        .help(count > 1
+              ? "Copy the \(count) selected fixtures from B into your file."
+              : "Copy this fixture from B into your file.")
+    }
+
+    /// B-only rows go by B's fixture and every other row by A's, so the
+    /// selected B fixtures are the selected B-only rows. Counted this way
+    /// rather than through the comparison, which every row's button would
+    /// otherwise be running again.
+    private var selectedOnlyInBCount: Int {
+        let inB = Set(rightDocument.fixtures.map(\.id))
+        return selectedRowIDs.filter(inB.contains).count
+    }
+
+    @ViewBuilder
+    private func statusBadge(_ row: MVRComparisonRow) -> some View {
+        if row.status == .matched, addedIDs.contains(row.id) {
+            // "Added" is also the way back out. Inside a selection, for
+            // every added row selected, as Add to A is.
+            let ids = selectedRowIDs.contains(row.id)
+                ? selectedRowIDs.intersection(addedIDs)
+                : [row.id]
+            UndoAddPill(count: ids.count) { undoAdd(ids) }
+        } else {
+            let (label, color) = status(of: row)
+            StatusPill(label: label, color: color)
+        }
+    }
+
+    private func status(of row: MVRComparisonRow) -> (String, Color) {
+        switch row.status {
+        case .matched where updatedIDs.contains(row.id): ("Updated", .purple)
+        case .matched: hasDifferences(row) ? ("Differs", .orange) : ("Same", .green)
+        case .leftOnly: ("A only", .secondary)
+        case .rightOnly: ("B only", .blue)
+        }
+    }
+
+    /// Takes fixtures added from B back out of A. Their rows are B's
+    /// again, in the same place, and stay picked out.
+    private func undoAdd(_ ids: Set<String>) {
+        let backInB = Set(comparisonRows.filter { ids.contains($0.id) }.compactMap { $0.rightFixture?.id })
+        leftDocument.deleteFixtures(withIDs: ids)
+        addedIDs.subtract(ids)
+        mergeMessage = "Took \(ids.count) fixture\(ids.count == 1 ? "" : "s") back out of A."
+        selectedRowIDs = backInB
+    }
+
+    // MARK: - Loading B
+
+    private func chooseFileB() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "mvr")].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        begin(with: url)
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
 
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
             guard
                 let data = item as? Data,
                 let url = URL(dataRepresentation: data, relativeTo: nil),
                 url.pathExtension.lowercased() == "mvr"
             else {
-                DispatchQueue.main.async {
-                    switch side {
-                    case .left: self.leftError = "Please drop a valid .mvr file."
-                    case .right: self.rightError = "Please drop a valid .mvr file."
-                    }
-                }
+                DispatchQueue.main.async { self.rightError = "Please drop a valid .mvr file." }
                 return
             }
-
-            DispatchQueue.main.async {
-                self.pendingDrop = (side, url)
-
-                // Only ask when the file genuinely doesn't say which field
-                // is real — same detection Single Edit uses on import.
-                switch MVRDocument.detectIDField(at: url) {
-                case .determined(let fieldName):
-                    self.loadPendingDrop(idFieldName: fieldName)
-                case .ambiguous:
-                    self.showFieldChoiceDialog = true
-                }
-            }
+            DispatchQueue.main.async { self.begin(with: url) }
         }
-
         return true
     }
 
-    private func loadPendingDrop(idFieldName: String) {
-        guard let pending = pendingDrop else { return }
-        pendingDrop = nil
-
-        let targetDocument = pending.side == .left ? leftDocument : rightDocument
-        do {
-            try targetDocument.load(from: pending.url, idFieldName: idFieldName)
-            switch pending.side {
-            case .left: leftError = nil
-            case .right: rightError = nil
-            }
-        } catch {
-            let message = "Failed to parse MVR file: \(error.localizedDescription)"
-            switch pending.side {
-            case .left: leftError = message
-            case .right: rightError = message
-            }
-        }
-    }
-
-    // MARK: - Export
-
-    private var exportSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(exportSide == .left ? "Export File A (\(leftDocument.fileName))" : "Export File B (\(rightDocument.fileName))")
-                .font(.headline)
-
-            Toggle("Include scene geometry", isOn: $includeSceneGeometry)
-            Text("When off, the exported file keeps only fixture and GDTF data — 3D venue geometry (files and <SceneObject> entries) is left out.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Assign fixture layers by type", isOn: $assignLayersByFixtureType)
-            Text("Groups fixtures into layers named after their GDTF spec. Everything else moves into a layer named \"NONE\".")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Replace all fixtures with dummy GDTFs", isOn: $replaceAllWithDummyGDTFs)
-            Text("Swaps every fixture's GDTF for a generated placeholder, even if the real one is present. Fixtures already missing a GDTF always get a placeholder regardless of this setting.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Cleanup empty classes and layers", isOn: $cleanupEmptyClassesAndLayers)
-            Text("Removes any layer with no objects in it, and any class no object references.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                Spacer()
-                Button("Cancel") { showExportSheet = false }
-                Button("Choose Location & Export…") {
-                    showExportSheet = false
-                    presentSavePanelAndExport()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(width: 440)
-    }
-
-    private func presentSavePanelAndExport() {
-        guard let side = exportSide else { return }
-        let document = side == .left ? leftDocument : rightDocument
-
-        let panel = NSSavePanel()
-        let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.prepareForExport(named: "\(baseName)_edited", fileExtension: "mvr")
-
-        let options = MVRExportOptions(
-            includeSceneGeometry: includeSceneGeometry,
-            assignLayersByFixtureType: assignLayersByFixtureType,
-            replaceAllWithDummyGDTFs: replaceAllWithDummyGDTFs,
-            cleanupEmptyClassesAndLayers: cleanupEmptyClassesAndLayers
-        )
-
-        panel.begin { response in
-            guard response == .OK, let destinationURL = panel.url else { return }
+    private func begin(with url: URL) {
+        guard !isOpeningB else { return }
+        isOpeningB = true
+        Task {
+            defer { isOpeningB = false }
             do {
-                try MVRExporter.export(document, to: destinationURL.ensuringPathExtension("mvr"), options: options)
-            } catch {
-                DispatchQueue.main.async {
-                    switch side {
-                    case .left: self.leftError = "Export failed: \(error.localizedDescription)"
-                    case .right: self.rightError = "Export failed: \(error.localizedDescription)"
-                    }
+                let file = try await MVRDocument.readInBackground(from: url)
+                pendingFile = file
+                // Only ask when the file genuinely doesn't say which field
+                // is real — the same detection the load screen uses.
+                switch file.idField {
+                case .determined(let fieldName): loadPendingDrop(idFieldName: fieldName)
+                case .ambiguous: showFieldChoiceDialog = true
                 }
+            } catch {
+                rightError = "Couldn't read that MVR: \(error.localizedDescription)"
             }
         }
+    }
+
+    private func loadPendingDrop(idFieldName: String) {
+        guard let file = pendingFile else { return }
+        pendingFile = nil
+        rightDocument.load(file, idFieldName: idFieldName)
+        rightError = nil
+        mergeMessage = nil
+        addedIDs = []
+        updatedIDs = []
+    }
+}
+
+/// How a row's two sides compare, in a word.
+private struct StatusPill: View {
+    let label: String
+    let color: Color
+    var symbol: String?
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let symbol {
+                Image(systemName: symbol)
+                    .imageScale(.small)
+            }
+            Text(label)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(color)
+        .padding(.horizontal, 6)
+        .frame(minWidth: 60)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.15), in: Capsule())
+    }
+}
+
+/// "Added", turning into what a click on it does once the pointer is
+/// there.
+private struct UndoAddPill: View {
+    let count: Int
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            StatusPill(
+                label: isHovered ? (count > 1 ? "Undo \(count)" : "Undo") : "Added",
+                color: isHovered ? .red : .purple,
+                symbol: "arrow.uturn.backward")
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(count > 1
+              ? "Take the \(count) selected fixtures back out of A."
+              : "Take this fixture back out of A.")
     }
 }
 
 #Preview {
-    CompareView(onBack: {})
+    CompareView(leftDocument: MVRDocument(), onBack: {})
 }

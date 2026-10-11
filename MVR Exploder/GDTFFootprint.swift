@@ -70,6 +70,32 @@ enum GDTFFootprintLoader {
     }
 }
 
+extension MVRDocument {
+    /// Footprints for every type in the file, for Mode Swap and the DMX
+    /// universe map.
+    ///
+    /// Off the main thread: a .gdtf is a zip full of meshes. GDTFs merged
+    /// in from another file aren't in this one's archive, so those are
+    /// read from the document afterwards.
+    func loadFootprints() async -> [String: [GDTFFootprint]] {
+        let specs = Array(Set(fixtures.map(\.gdtfSpec)))
+        let url = originalFileURL
+        var loaded = await Task.detached(priority: .userInitiated) {
+            url.map { GDTFFootprintLoader.load(mvrURL: $0, specs: specs) } ?? [:]
+        }.value
+
+        for spec in specs where loaded[spec] == nil {
+            let name = (spec as NSString).lastPathComponent
+            let fileName = name.lowercased().hasSuffix(".gdtf") ? name : name + ".gdtf"
+            if let data = injectedGDTFFiles[fileName] {
+                let modes = GDTFFootprintParser.modes(packageData: data)
+                if !modes.isEmpty { loaded[spec] = modes }
+            }
+        }
+        return loaded
+    }
+}
+
 enum GDTFFootprintParser {
 
     /// Every mode in a .gdtf package, with its channel count.
@@ -91,10 +117,32 @@ enum GDTFFootprintParser {
 
     static func modes(description document: XMLDocument) -> [GDTFFootprint] {
         let nodes = (try? document.nodes(forXPath: "//DMXModes/DMXMode")) ?? []
+        let geometries = Geometries(document)
         return nodes.compactMap { node in
             guard let mode = node as? XMLElement,
                   let name = mode.attribute(forName: "Name")?.stringValue else { return nil }
-            return GDTFFootprint(mode: name, channelsByBreak: channels(in: mode))
+            return GDTFFootprint(mode: name, channelsByBreak: channels(in: mode, geometries: geometries))
+        }
+    }
+
+    /// The fixture's geometry tree, as far as footprints need it: which
+    /// top-level geometry each named geometry sits under.
+    private struct Geometries {
+        var topLevel: [String: XMLElement] = [:]
+        var templateOf: [String: String] = [:]
+
+        init(_ document: XMLDocument) {
+            guard let root = (try? document.nodes(forXPath: "//Geometries"))?.first as? XMLElement
+            else { return }
+            for case let top as XMLElement in root.children ?? [] {
+                guard let name = top.attribute(forName: "Name")?.stringValue else { continue }
+                topLevel[name] = top
+                for case let node as XMLElement in (try? top.nodes(forXPath: "descendant-or-self::*")) ?? [] {
+                    if let named = node.attribute(forName: "Name")?.stringValue, templateOf[named] == nil {
+                        templateOf[named] = name
+                    }
+                }
+            }
         }
     }
 
@@ -105,17 +153,55 @@ enum GDTFFootprintParser {
     /// largest number mentioned anywhere, not the channel count. Channels
     /// with no offset are virtual: they exist in the fixture's logic and
     /// take no DMX, and counting them would overstate the patch.
-    private static func channels(in mode: XMLElement) -> [Int: Int] {
+    ///
+    /// Pixel fixtures define a pixel's channels once, on a template
+    /// geometry, and place it again and again with `<GeometryReference>`s.
+    /// Each placement's `<Break DMXOffset>` says where its copy starts, so a
+    /// template channel lands at its own offset plus that, less one — the
+    /// GDTF spec's rule. Reading the template's offsets alone made a
+    /// 117-channel Pixelline mode look 5 channels wide.
+    private static func channels(in mode: XMLElement, geometries: Geometries) -> [Int: Int] {
+        // Every placement of a template in this mode: its breaks, in order.
+        typealias Placement = [(dmxBreak: String, offset: Int)]
+        let rootName = mode.attribute(forName: "Geometry")?.stringValue ?? ""
+        var placements: [String: [Placement]] = [:]
+        if let root = geometries.topLevel[rootName] {
+            for case let reference as XMLElement in (try? root.nodes(forXPath: ".//GeometryReference")) ?? [] {
+                guard let template = reference.attribute(forName: "Geometry")?.stringValue else { continue }
+                let breaks: Placement = reference.elements(forName: "Break").map {
+                    (dmxBreak: $0.attribute(forName: "DMXBreak")?.stringValue ?? "1",
+                     offset: $0.attribute(forName: "DMXOffset")?.stringValue.flatMap { Int($0) } ?? 1)
+                }
+                placements[template, default: []].append(breaks)
+            }
+        }
+
         var byBreak: [Int: Int] = [:]
+        func reach(_ channel: Int, on dmxBreak: String) {
+            let key = Int(dmxBreak) ?? 1
+            byBreak[key] = max(byBreak[key] ?? 0, channel)
+        }
+
         for case let channel as XMLElement in (try? mode.nodes(forXPath: ".//DMXChannel")) ?? [] {
             let offsets = (channel.attribute(forName: "Offset")?.stringValue ?? "")
                 .split(separator: ",")
                 .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
             guard let highest = offsets.max() else { continue }
+            let channelBreak = channel.attribute(forName: "DMXBreak")?.stringValue ?? "1"
 
-            let dmxBreak = channel.attribute(forName: "DMXBreak")?.stringValue
-                .flatMap(Int.init) ?? 1
-            byBreak[dmxBreak] = max(byBreak[dmxBreak] ?? 0, highest)
+            if let geometry = channel.attribute(forName: "Geometry")?.stringValue,
+               let template = geometries.templateOf[geometry], template != rootName,
+               let placed = placements[template] {
+                for breaks in placed {
+                    // "Overwrite" channels take the placement's last break.
+                    let chosen = channelBreak == "Overwrite"
+                        ? breaks.last
+                        : breaks.first { $0.dmxBreak == channelBreak }
+                    if let chosen { reach(highest + chosen.offset - 1, on: chosen.dmxBreak) }
+                }
+            } else {
+                reach(highest, on: channelBreak)
+            }
         }
         return byBreak
     }

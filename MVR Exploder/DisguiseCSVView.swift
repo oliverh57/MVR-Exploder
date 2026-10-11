@@ -4,25 +4,23 @@ import UniformTypeIdentifiers
 /// Turns an MVR into the `x,y,universe,channel` CSV Disguise reads as a
 /// DMX screen.
 ///
-/// Four steps, because each one needs the answer to the last: open a file,
-/// pick the fixture type the screen is made of, tick the fixtures that are
-/// in it, then say how that fixture's pixels are laid out and which
-/// channel drives each one.
+/// Three steps on the open file, because each one needs the answer to the
+/// last: pick the fixture type the screen is made of, tick the fixtures
+/// that are in it, then say how that fixture's pixels are laid out and
+/// which channel drives each one.
 ///
 /// The pixel layout is typed in rather than read from the GDTF. A GDTF can
 /// describe it, but most files in the wild carry a stand-in that doesn't,
 /// and the person doing the patch knows the answer anyway.
 struct DisguiseCSVView: View {
+    @ObservedObject var document: MVRDocument
     let onBack: () -> Void
 
-    @StateObject private var document = MVRDocument()
-
     private enum Step: Int, CaseIterable {
-        case file, type, fixtures, pixels
+        case type, fixtures, pixels
 
         var title: String {
             switch self {
-            case .file: return "Open an MVR"
             case .type: return "Fixture type"
             case .fixtures: return "Fixtures"
             case .pixels: return "Pixel layout"
@@ -30,8 +28,7 @@ struct DisguiseCSVView: View {
         }
     }
 
-    @State private var step: Step = .file
-    @State private var isTargeted = false
+    @State private var step: Step = .type
     @State private var errorMessage: String?
 
     @State private var selectedSpec: String?
@@ -66,6 +63,12 @@ struct DisguiseCSVView: View {
     @State private var gap = DisguisePixelMap.Gap.none
 
     @State private var block = DisguisePixelMap.Block(columns: 16, rows: 2)
+    /// DMX channels each pixel takes — 3 for RGB, or whatever the fixture
+    /// uses. It's the step the fill counts in, so pixel 2 of an RGB line
+    /// starting at 6 is offered 9.
+    @AppStorage("disguiseChannelsPerPixel") private var channelsPerPixel = 3
+    /// The pixel setup sheet, asked on arriving at the pixel page.
+    @State private var showsPixelSetup = false
     @State private var selectedCell: Int?
     @State private var offsetText = ""
     /// The pixel the suggested fill counts from, and the gap between
@@ -99,6 +102,7 @@ struct DisguiseCSVView: View {
     @State private var visibleRect: CGRect = .zero
     /// Set while the "clear everything" question is on screen.
     @State private var isClearing = false
+    @State private var isConfirmingLeave = false
 
     /// What a pixel is, in the three terms the CSV is written in.
     private struct HoveredPixel: Equatable {
@@ -120,7 +124,6 @@ struct DisguiseCSVView: View {
             Divider()
 
             switch step {
-            case .file: filePicker
             case .type: typePicker
             case .fixtures: fixturePicker
             case .pixels: pixelEditor
@@ -129,27 +132,36 @@ struct DisguiseCSVView: View {
             Divider()
             footer
         }
-        .onDrop(of: [.fileURL], isTargeted: $isTargeted, perform: handleDrop)
+        // On the screen itself, not on one step's view: both are opened
+        // from the pixel page, and a dialog hung off a step that isn't
+        // showing never appears — which is how Clear All went dead.
+        .sheet(isPresented: $showsPixelSetup) { pixelSetupSheet }
+        .confirmationDialog(
+            "Clear the pixel layout?",
+            isPresented: $isClearing,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Everything", role: .destructive) { clearLayout() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Clears every offset and resets the rotation, direction, corner and gap.")
+        }
+        .confirmationDialog(
+            "Leave the Disguise CSV?",
+            isPresented: $isConfirmingLeave,
+            titleVisibility: .visible
+        ) {
+            Button("Leave", role: .destructive) { onBack() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The fixtures and pixel layout picked here aren't kept.")
+        }
     }
 
     // MARK: - Chrome
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Button("Back") { goBack() }
-                .help(step == .file
-                      ? "Back to the mode list."
-                      : "Back to \(Step(rawValue: step.rawValue - 1)?.title ?? "").")
-
-            Text("Disguise CSV Generator")
-                .font(.headline)
-
-            if !document.fileName.isEmpty {
-                Text(document.fileName)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
+        ToolHeader("Disguise CSV", onBack: leave) {
             Spacer()
 
             // The steps double as navigation back to anything already done.
@@ -169,7 +181,6 @@ struct DisguiseCSVView: View {
                 }
             }
         }
-        .padding(12)
     }
 
     private var footer: some View {
@@ -186,6 +197,11 @@ struct DisguiseCSVView: View {
             }
 
             Spacer()
+
+            if let previous = Step(rawValue: step.rawValue - 1) {
+                Button("Back") { step = previous }
+                    .help("Back to \(previous.title).")
+            }
 
             if step == .pixels {
                 Text("\(grid.width) × \(grid.height) pixels  ·  \(pixelCount.formatted()) mapped")
@@ -205,37 +221,28 @@ struct DisguiseCSVView: View {
 
     private var footerHint: String {
         switch step {
-        case .file: return "Drop an .mvr file here, or choose one."
         case .type: return "Which fixture type is the screen made of?"
         case .fixtures:
-            return "\(selectedFixtureIDs.count) of \(fixturesOfType.count) ticked — "
-                + "laid out in the order listed here."
+            return "\(selectedFixtureIDs.count) of \(fixturesOfType.count) ticked."
         case .pixels:
-            return "Click a pixel and type the DMX offset from the fixture's own address."
+            return "Click a pixel to set its DMX offset."
         }
-    }
-
-    // MARK: - Step 1: the file
-
-    private var filePicker: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "square.and.arrow.down")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text("Drop an MVR here")
-                .font(.title3)
-            Text("Or choose one — the fixtures and their DMX addresses come from it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("Choose MVR…") { chooseFile() }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(isTargeted ? Color.accentColor.opacity(0.08) : .clear)
     }
 
     // MARK: - Step 2: the type
 
     private var typePicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Select a fixture type")
+                .font(.title3.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 6)
+            typeList
+        }
+    }
+
+    private var typeList: some View {
         List(typeSummaries, id: \.spec, selection: Binding(
             get: { selectedSpec },
             set: { selectedSpec = $0 })
@@ -281,8 +288,7 @@ struct DisguiseCSVView: View {
     private var fixturePicker: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Sort a column to change the order they're laid out in. "
-                     + "Select rows and tick any one of them to tick them all.")
+                Text("Sort a column to change the order. Tick a selected row to tick them all.")
                     .foregroundStyle(.secondary)
 
                 Spacer()
@@ -359,14 +365,10 @@ struct DisguiseCSVView: View {
             // alone — the same as the delete menu in the other tables.
             .contextMenu(forSelectionType: String.self) { ids in
                 if !ids.isEmpty {
-                    Button(ids.count == 1
-                           ? "Include in the Screen"
-                           : "Include \(ids.count) Fixtures in the Screen") {
+                    Button(ids.count == 1 ? "Tick" : "Tick \(ids.count) Fixtures") {
                         setTicked(true, for: ids)
                     }
-                    Button(ids.count == 1
-                           ? "Leave Out of the Screen"
-                           : "Leave \(ids.count) Fixtures Out of the Screen") {
+                    Button(ids.count == 1 ? "Untick" : "Untick \(ids.count) Fixtures") {
                         setTicked(false, for: ids)
                     }
                 }
@@ -377,18 +379,6 @@ struct DisguiseCSVView: View {
             selectionPreview
                 .frame(width: previewWidth)
             }
-        }
-        .confirmationDialog(
-            "Clear the pixel layout?",
-            isPresented: $isClearing,
-            titleVisibility: .visible
-        ) {
-            Button("Clear Everything", role: .destructive) { clearLayout() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Every offset you've typed goes, along with the rotation, the "
-                 + "pixel direction, the starting corner and the gap. The block "
-                 + "stays the size it is, and the fixtures stay ticked.")
         }
         .onChange(of: selectedFixtureIDs) { _, _ in orderRevision += 1; schedulePlay() }
         .onChange(of: sortOrder) { _, _ in orderRevision += 1; schedulePlay() }
@@ -465,9 +455,8 @@ struct DisguiseCSVView: View {
 
             HStack(spacing: 8) {
                 Text(orderedSelectedIDs.isEmpty
-                     ? "Nothing ticked yet — every fixture of this type is grey."
-                     : "Coloured fixtures are on the screen, grey ones are left "
-                       + "out. Drag to orbit, Shift-drag to pan.")
+                     ? "Nothing ticked yet."
+                     : "Coloured fixtures are included. Drag to orbit, Shift-drag to pan.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -481,8 +470,7 @@ struct DisguiseCSVView: View {
                 .font(.caption)
                 .controlSize(.small)
                 .disabled(orderedSelectedIDs.count < 2)
-                .help("Runs through the fixtures in the order they'll be written "
-                      + "to the CSV, 1 → \(max(orderedSelectedIDs.count, 1)).")
+                .help("Show the order fixtures appear in the CSV.")
             }
             .padding(10)
         }
@@ -551,17 +539,19 @@ struct DisguiseCSVView: View {
 
                 Divider().frame(height: 18)
 
+
                 Text("Fixture Rotation:")
+                    .fixedSize()
                 Picker("", selection: $rotation) {
                     ForEach(DisguisePixelMap.Rotation.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 200)
                 .onChange(of: rotation) { _, _ in fill = nil }
-                .help("Turn the fixture. A line on its end makes a tower, and the pixel "
-                      + "coordinates follow.")
+                .help("Rotate the fixture — 90° stands a line up as a tower.")
 
                 Text("Pixel Direction:")
+                    .fixedSize()
                 Picker("", selection: Binding(
                     get: { block.order },
                     set: { block.order = $0; fill = nil })) {
@@ -570,19 +560,17 @@ struct DisguiseCSVView: View {
                     }
                 }
                 .frame(width: 170)
-                .help("Which way the pixels are counted inside one fixture. "
-                      + "Snaking is what most battens and tiles do.")
+                .help("The order the pixels are counted in.")
 
                 Text("Pixel 1 at:")
+                    .fixedSize()
                 Picker("", selection: Binding(
                     get: { block.start },
                     set: { block.start = $0; fill = nil })) {
                     ForEach(DisguisePixelMap.PixelStart.allCases) { Text($0.label).tag($0) }
                 }
                 .frame(width: 130)
-                .help("The corner the count starts from, before the fixture is "
-                      + "turned. Turning a fixture 90° puts its top-left end on "
-                      + "the right, so this is what brings pixel 1 back to the left.")
+                .help("Which corner pixel 1 is in, as shown.")
 
                 Spacer()
             }
@@ -617,9 +605,7 @@ struct DisguiseCSVView: View {
 
             Divider()
 
-            Text("\(drawnPlacements.count) × \(selectedTypeName), turned "
-                 + "\(rotation.label). Hover a fixture to work on it — "
-                 + "they all share one layout.")
+            Text("\(drawnPlacements.count) × \(selectedTypeName). Every fixture shares this layout.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -635,7 +621,7 @@ struct DisguiseCSVView: View {
                         .foregroundStyle(Color.accentColor)
                     Text("Click the first pixel to set its DMX offset.")
                         .fontWeight(.medium)
-                    Text("The rest are then offered in grey.")
+                    Text("The rest will be suggested.")
                         .foregroundStyle(.secondary)
                 }
                 .font(.callout)
@@ -740,12 +726,79 @@ struct DisguiseCSVView: View {
         return fit >= Self.minimumGridScale ? min(1, fit) : 1
     }
 
+    /// Channels per pixel: 3 for RGB unless a different number is typed.
+    private func channelsControl(_ value: Binding<Int>) -> some View {
+        TextField("", value: Binding(
+            get: { value.wrappedValue },
+            set: { value.wrappedValue = min(64, max(1, $0)) }), format: .number)
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 48)
+            .multilineTextAlignment(.trailing)
+    }
+
+    /// Asked on arriving at the pixel page: how big a fixture is. How many
+    /// channels each pixel takes is asked where it's used, in the fill.
+    private var pixelSetupSheet: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Pixel layout")
+                    .font(.headline)
+                Text(selectedTypeName)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    Text("Pixels across")
+                        .gridColumnAlignment(.trailing)
+                    numberStepper(Binding(
+                        get: { block.columns },
+                        set: { block.resize(columns: $0, rows: block.rows); fill = nil }),
+                        range: 1...256)
+                }
+                GridRow {
+                    Text("Pixels high")
+                    numberStepper(Binding(
+                        get: { block.rows },
+                        set: { block.resize(columns: block.columns, rows: $0); fill = nil }),
+                        range: 1...64)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Continue") { showsPixelSetup = false }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
+    }
+
+    /// A number typed in or stepped, with no label of its own.
+    private func numberStepper(_ value: Binding<Int>, range: ClosedRange<Int>) -> some View {
+        HStack(spacing: 4) {
+            TextField("", value: Binding(
+                get: { value.wrappedValue },
+                set: { value.wrappedValue = min(range.upperBound, max(range.lowerBound, $0)) }),
+                format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 52)
+                .multilineTextAlignment(.trailing)
+            Stepper("", value: value, in: range)
+                .labelsHidden()
+        }
+    }
+
     /// One of the two block dimensions, typed in or stepped.
     private func sizeField(
         _ title: String, value: Binding<Int>, range: ClosedRange<Int>
     ) -> some View {
         HStack(spacing: 4) {
             Text(title)
+                .fixedSize()
             TextField("", value: Binding(
                 get: { value.wrappedValue },
                 set: { value.wrappedValue = min(range.upperBound, max(range.lowerBound, $0)) }),
@@ -784,7 +837,7 @@ struct DisguiseCSVView: View {
                     set: { gap.between = max(0, $0) }), format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 44)
-                    .help("Pixels of air between one fixture and the next.")
+                    .help("Gap between fixtures, in pixels.")
 
                 Text("stagger")
                     .foregroundStyle(.secondary)
@@ -795,13 +848,10 @@ struct DisguiseCSVView: View {
                     set: { gap.across = max(0, $0) }), format: .number)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 44)
-                    .help("How far each fixture steps sideways from the one "
-                          + "before it. Zero keeps the row — or the tower — straight.")
+                    .help("Shifts each fixture sideways from the last.")
             }
         }
-        .help("Pixels left between one fixture and the next, measured along the "
-              + "way they run: sideways for a row, downwards once they are stood "
-              + "on end.")
+        .help("Leave space between fixtures on the screen.")
     }
 
     /// The offer to fill the rest in, with the gap it would use.
@@ -814,18 +864,18 @@ struct DisguiseCSVView: View {
                   systemImage: "wand.and.stars")
                 .font(.headline)
 
-            HStack(spacing: 6) {
-                Text("counting up in")
-                TextField("", value: Binding(
-                    get: { fill?.step ?? 3 },
-                    set: { fill?.step = max(1, $0) }), format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 52)
-                Text("from \(fill?.value ?? 0)")
+            // The step the fill counts in is the channels each pixel takes,
+            // so that is what's asked here. Changing it is remembered for
+            // the next fixture too.
+            HStack(spacing: 8) {
+                Text("Channels per pixel:")
+                channelsControl(Binding(
+                    get: { fill?.step ?? channelsPerPixel },
+                    set: { fill?.step = $0; channelsPerPixel = $0 }))
             }
             .font(.callout)
 
-            Text("Shown in grey on the grid until you accept.")
+            Text("Starting from \(fill?.value ?? 0). Shown in grey on the grid until you accept.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -863,7 +913,7 @@ struct DisguiseCSVView: View {
         // which is what made a screen of fixtures crawl.
         let size = DisguisePixelMap.size(of: block, rotation: rotation)
         let cells = turnedCells
-        let ranks = block.ranks
+        let ranks = block.ranks(rotation: rotation)
         let suggested = suggestions
         let fixtures = laidOutFixtures
         let captions = (0..<drawn.count).map { blockCaption(forFixtureAt: $0, in: fixtures) }
@@ -1262,9 +1312,7 @@ struct DisguiseCSVView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
             }
-            Text("Column \(column + 1), row \(row + 1). The DMX offset is counted "
-                 + "from the fixture's own address: a line patched at 1 whose first "
-                 + "pixel is at 6 has an offset of 6.")
+            Text("Column \(column + 1), row \(row + 1). Offset from the fixture's address — if pixel 1 starts on channel 6, enter 6.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1308,7 +1356,8 @@ struct DisguiseCSVView: View {
     /// The suggested value for each empty pixel, keyed by cell index.
     private var suggestions: [Int: Int] {
         guard let fill else { return [:] }
-        return block.suggestions(anchor: fill.anchor, value: fill.value, step: fill.step)
+        return block.suggestions(
+            anchor: fill.anchor, value: fill.value, step: fill.step, rotation: rotation)
     }
 
     /// Back to an empty layout of the same size.
@@ -1360,20 +1409,21 @@ struct DisguiseCSVView: View {
 
     private var canAdvance: Bool {
         switch step {
-        case .file: return !document.fixtures.isEmpty
         case .type: return selectedSpec != nil
         case .fixtures: return !selectedFixtureIDs.isEmpty
         case .pixels: return false
         }
     }
 
-    /// One step back, and out to the mode list only from the first —
+    /// One step back, and out to the tools only from the first —
     /// the steps are a sequence, so Back ought to walk it.
-    private func goBack() {
-        if let previous = Step(rawValue: step.rawValue - 1) {
-            step = previous
-        } else {
+    /// Straight out from the first step; past it there's a choice of
+    /// fixtures, and maybe a pixel layout, that leaving throws away.
+    private func leave() {
+        if step == .type {
             onBack()
+        } else {
+            isConfirmingLeave = true
         }
     }
 
@@ -1384,6 +1434,7 @@ struct DisguiseCSVView: View {
             rowSelection = []
         }
         step = next
+        if next == .pixels { showsPixelSetup = true }
     }
 
     private func commitOffset() {
@@ -1398,13 +1449,14 @@ struct DisguiseCSVView: View {
         // filled in once there are two to compare, and is a plain RGB
         // pixel until then — either way it is editable in the bar.
         if let typed {
-            fill = Fill(anchor: selectedCell, value: typed, step: block.inferredStep())
+            fill = Fill(anchor: selectedCell, value: typed,
+                        step: block.inferredStep(fallback: max(1, channelsPerPixel), rotation: rotation))
         }
 
         // Straight on to the next pixel, because the job is typing a
         // number into every one of them in turn — next along the order
         // being counted, which on a snaking fixture doubles back.
-        let sequence = block.sequence
+        let sequence = block.sequence(rotation: rotation)
         if let place = sequence.firstIndex(of: selectedCell),
            place + 1 < sequence.count {
             let next = sequence[place + 1]
@@ -1412,44 +1464,6 @@ struct DisguiseCSVView: View {
             offsetText = block.offset(column: next % block.columns, row: next / block.columns)
                 .map(String.init) ?? ""
             offsetFocused = true
-        }
-    }
-
-    private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "mvr")].compactMap { $0 }
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        load(url)
-    }
-
-    private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            guard let data = item as? Data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil),
-                  url.pathExtension.lowercased() == "mvr" else {
-                DispatchQueue.main.async { errorMessage = "Please drop a valid .mvr file." }
-                return
-            }
-            DispatchQueue.main.async { load(url) }
-        }
-        return true
-    }
-
-    private func load(_ url: URL) {
-        do {
-            // Whichever field holds the ID doesn't matter here — the CSV is
-            // built from DMX addresses, not fixture IDs — so this never
-            // stops to ask.
-            try document.load(from: url, idFieldName: "FixtureID")
-            errorMessage = nil
-            selectedSpec = nil
-            selectedFixtureIDs = []
-            rowSelection = []
-            step = .type
-        } catch {
-            errorMessage = "Couldn't read that MVR: \(error.localizedDescription)"
         }
     }
 
@@ -1657,7 +1671,7 @@ private struct CSVPreview: View, Equatable {
             Divider()
 
             if rows.isEmpty {
-                Text("Give a pixel an offset and its row appears here.")
+                Text("Rows appear as you set offsets.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(10)

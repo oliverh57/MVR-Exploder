@@ -57,7 +57,7 @@ struct EditableCell<Content: View>: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.blue)
-                .help("Revert this value to the one in the original file")
+                .help("Revert to the original")
             }
         }
         .contentShape(Rectangle())
@@ -139,7 +139,7 @@ struct EditableLayerCell: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.blue)
-                .help("Revert this value to the one in the original file")
+                .help("Revert to the original")
             }
         }
         .contentShape(Rectangle())

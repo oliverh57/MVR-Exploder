@@ -61,11 +61,13 @@ enum MVRTestRig {
     static func write(
         _ fixtures: [Fixture],
         layer: String = "Lighting",
+        layerUUID: String = "11111111-2222-3333-4444-555555555555",
         sceneObjects: [SceneObject] = [],
         file: StaticString = #filePath, line: UInt = #line
     ) throws -> URL {
         let url = temporaryDirectory().appendingPathComponent("\(UUID().uuidString).mvr")
-        let xml = sceneDescription(fixtures: fixtures, layer: layer, sceneObjects: sceneObjects)
+        let xml = sceneDescription(
+            fixtures: fixtures, layer: layer, layerUUID: layerUUID, sceneObjects: sceneObjects)
 
         let workDir = temporaryDirectory().appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
@@ -90,9 +92,8 @@ enum MVRTestRig {
     // MARK: - XML
 
     private static func sceneDescription(
-        fixtures: [Fixture], layer: String, sceneObjects: [SceneObject]
+        fixtures: [Fixture], layer: String, layerUUID: String, sceneObjects: [SceneObject]
     ) -> String {
-        let layerUUID = "11111111-2222-3333-4444-555555555555"
         var children = fixtures.map(fixtureXML).joined(separator: "\n")
         for object in sceneObjects {
             children += "\n" + sceneObjectXML(object)

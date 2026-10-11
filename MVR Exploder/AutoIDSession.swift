@@ -464,8 +464,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
         let listed = names.count == 2
             ? names.joined(separator: " and ")
             : names.dropLast().joined(separator: ", ") + " and " + (names.last ?? "")
-        return "\(listed) look like one system in different lengths. "
-            + "Number them as one type, so all \(total) run in a single sequence?"
+        return "\(listed) look like the same fixture in different lengths. Number all \(total) together?"
     }
 
     /// Takes up a suggestion — the same operation as linking by hand.
@@ -514,8 +513,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
         }
         // The subject is the bars, not the types: one bar below is "LX1
         // is", several is "LX1–LX3 are".
-        return "Bars are numbered across the whole rig. \(bars) "
-            + "\(lowest == 2 ? "is" : "are") on \(on), so this type starts at LX\(lowest)."
+        return "Starts at LX\(lowest) — \(bars) \(lowest == 2 ? "is" : "are") on \(on)."
     }
 
     private func orderedUniqueNames(_ names: [String]) -> [String] {
@@ -535,7 +533,7 @@ final class AutoIDSession: ObservableObject, Identifiable {
             }
         }
 
-        var note = "LX\(number) of \(total.count) bars in the rig. Bars are numbered across the whole rig, so this type's list skips the ones it isn't on."
+        var note = "LX\(number) of \(total.count) bars in the rig."
         if !sharedWith.isEmpty {
             note += "\nAlso on this bar: " + sharedWith.sorted().joined(separator: ", ") + "."
         }
@@ -1026,9 +1024,11 @@ final class AutoIDSession: ObservableObject, Identifiable {
     /// fixture list stay in step and each change is revertible exactly like
     /// a hand edit.
     func apply(to document: MVRDocument) {
+        var newIDs: [String: Int] = [:]
         for assignment in plan.assignments where assignment.isChanged {
-            document.setFixtureID(assignment.newID, forFixtureAtID: assignment.fixtureID)
+            newIDs[assignment.fixtureID] = assignment.newID
         }
+        document.setFixtureIDs(newIDs)
 
         // Group names ride along, so they can be written to <UserData> on
         // export. Existing names for fixtures this run didn't touch are

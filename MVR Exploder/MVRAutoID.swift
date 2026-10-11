@@ -50,12 +50,12 @@ enum AutoIDOrderStrategy: String, CaseIterable, Identifiable, Hashable {
 
     var detail: String {
         switch self {
-        case .leftToRight: return "Across the stage, top-down where fixtures share a position."
-        case .aroundShape: return "Follows the run from one end round to the other."
+        case .leftToRight: return "Left to right across the stage."
+        case .aroundShape: return "From one end of the shape round to the other."
         case .zigZagRows: return "Row by row, alternating direction each row."
-        case .rowsSameDirection: return "Across, then back to the same side and across again."
-        case .topToBottom: return "Down the group, left to right at each height."
-        case .columnsTopToBottom: return "For a tower carrying more than one fixture at each height: all the way down one column, then down the next."
+        case .rowsSameDirection: return "Row by row, every row the same way."
+        case .topToBottom: return "Top to bottom, left to right at each height."
+        case .columnsTopToBottom: return "Down one column, then the next."
         }
     }
 }

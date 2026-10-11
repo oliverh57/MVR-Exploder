@@ -99,6 +99,33 @@ final class RealFileCorpusTests: XCTestCase {
         }
     }
 
+    /// A mode named for its size — "117 channel", "Mode 9 FP Spix (68ch)"
+    /// — reads as that size. Pixel modes once read as one pixel's worth.
+    func testModesNamedForTheirSizeReadAsThatSize() throws {
+        let sized = try NSRegularExpression(pattern: #"(\d+)\s*(?:ch|channel)"#, options: .caseInsensitive)
+        var checked = 0
+        for url in try corpus() {
+            let document = MVRDocument()
+            guard (try? document.load(from: url, idFieldName: "FixtureID")) != nil else { continue }
+            let footprints = GDTFFootprintLoader.load(
+                mvrURL: url, specs: document.fixtures.map(\.gdtfSpec))
+            for (spec, modes) in footprints {
+                for mode in modes {
+                    let name = mode.mode as NSString
+                    guard let match = sized.firstMatch(
+                        in: mode.mode, range: NSRange(location: 0, length: name.length)),
+                          let expected = Int(name.substring(with: match.range(at: 1)))
+                    else { continue }
+                    checked += 1
+                    XCTAssertTrue(
+                        mode.channels == expected || mode.channelsByBreak.values.reduce(0, +) == expected,
+                        "\(spec) \(mode.mode) reads as \(mode.channelsByBreak)")
+                }
+            }
+        }
+        XCTAssertGreaterThan(checked, 0, "no modes named for their size in the corpus")
+    }
+
     // MARK: - Helpers
 
     private func eachFile(

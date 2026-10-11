@@ -53,17 +53,6 @@ enum MVRExporter {
             removeEmptyClassesAndLayers(from: exportXML)
         }
 
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            try FileManager.default.removeItem(at: destinationURL)
-        }
-
-        guard let sourceArchive = try? Archive(url: sourceURL, accessMode: .read) else {
-            throw MVRExportError.cannotOpenSourceArchive
-        }
-        guard let newArchive = try? Archive(url: destinationURL, accessMode: .create) else {
-            throw MVRExportError.cannotCreateDestinationArchive
-        }
-
         // Work through real files on disk rather than in-memory Data —
         // ZIPFoundation's fileURL-based API is stable across versions,
         // unlike its Data-provider API which has changed signature before.
@@ -71,6 +60,39 @@ enum MVRExporter {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: workDir) }
+
+        // Built beside the scratch files and only swapped in once it's
+        // whole. Deleting the destination first lost the original whenever
+        // it was saved over — it's also the source this reads from — and
+        // lost whatever was there on any failure part-way.
+        let stagedURL = workDir.appendingPathComponent("export.mvr")
+        try writeArchive(
+            document, exportXML: exportXML, sourceURL: sourceURL,
+            options: options, to: stagedURL, workDir: workDir)
+
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            _ = try FileManager.default.replaceItemAt(destinationURL, withItemAt: stagedURL)
+        } else {
+            try FileManager.default.moveItem(at: stagedURL, to: destinationURL)
+        }
+    }
+
+    /// Writes the archive itself. A function of its own so the archive is
+    /// closed by the time the caller moves the finished file into place.
+    private static func writeArchive(
+        _ document: MVRDocument,
+        exportXML: XMLDocument,
+        sourceURL: URL,
+        options: MVRExportOptions,
+        to archiveURL: URL,
+        workDir: URL
+    ) throws {
+        guard let sourceArchive = try? Archive(url: sourceURL, accessMode: .read) else {
+            throw MVRExportError.cannotOpenSourceArchive
+        }
+        guard let newArchive = try? Archive(url: archiveURL, accessMode: .create) else {
+            throw MVRExportError.cannotCreateDestinationArchive
+        }
 
         // Make sure every fixture points at a GDTF file that will actually
         // be in the archive — generating dummy placeholders as needed. This

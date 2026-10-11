@@ -63,11 +63,20 @@ private final class HoverTrackingSCNView: SCNView {
     var onOrbitDrag: ((CGFloat, CGFloat) -> Void)?
     var onPanDrag: ((CGFloat, CGFloat) -> Void)?
     var onZoom: ((CGFloat, CGPoint) -> Void)?
-    var onClick: ((CGPoint) -> Void)?
+    /// A click, and whether Shift was held.
+    var onClick: ((CGPoint, Bool) -> Void)?
+    /// A Shift-drag box, in this view's coordinates.
+    var onBoxSelect: ((CGRect) -> Void)?
+    /// The menu for a right-click that didn't turn into a pan.
+    var menuForRightClick: ((CGPoint) -> NSMenu?)?
     private var trackingArea: NSTrackingArea?
     /// Where the current left-press started, so a press that turns into an
     /// orbit drag isn't also reported as a click on mouse-up.
     private var pressOrigin: CGPoint?
+    /// Set when a press began with Shift held: the drag draws a box.
+    private var boxOrigin: CGPoint?
+    private var boxLayer: CAShapeLayer?
+    private var rightPressOrigin: CGPoint?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -96,7 +105,9 @@ private final class HoverTrackingSCNView: SCNView {
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
-        pressOrigin = convert(event.locationInWindow, from: nil)
+        let point = convert(event.locationInWindow, from: nil)
+        pressOrigin = point
+        boxOrigin = event.modifierFlags.contains(.shift) ? point : nil
     }
 
     /// Treats a press that barely moved as a click. Without the distance
@@ -104,27 +115,68 @@ private final class HoverTrackingSCNView: SCNView {
     /// button came back up.
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
-        defer { pressOrigin = nil }
+        defer {
+            pressOrigin = nil
+            boxOrigin = nil
+            boxLayer?.removeFromSuperlayer()
+            boxLayer = nil
+        }
         guard let origin = pressOrigin else { return }
         let end = convert(event.locationInWindow, from: nil)
         if hypot(end.x - origin.x, end.y - origin.y) <= 4 {
-            onClick?(end)
+            onClick?(end, event.modifierFlags.contains(.shift))
+        } else if let start = boxOrigin {
+            onBoxSelect?(Self.box(from: start, to: end))
         }
     }
 
-    /// Left-drag orbits; holding Shift or Command pans instead, matching
-    /// the modifier conventions of most CAD and previz tools.
+    private static func box(from a: CGPoint, to b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+    }
+
+    /// Left-drag orbits; Shift-drag draws a selection box; Command-drag
+    /// pans. Shift used to pan too, until it was wanted for selecting.
     override func mouseDragged(with event: NSEvent) {
         super.mouseDragged(with: event)
-        if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let start = boxOrigin {
+            drawBox(Self.box(from: start, to: point))
+        } else if event.modifierFlags.contains(.command) {
             onPanDrag?(event.deltaX, event.deltaY)
         } else {
             onOrbitDrag?(event.deltaX, event.deltaY)
         }
     }
 
+    private func drawBox(_ rect: CGRect) {
+        if boxLayer == nil {
+            let layer = CAShapeLayer()
+            layer.strokeColor = NSColor.controlAccentColor.cgColor
+            layer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
+            layer.lineWidth = 1
+            wantsLayer = true
+            self.layer?.addSublayer(layer)
+            boxLayer = layer
+        }
+        boxLayer?.path = CGPath(rect: rect, transform: nil)
+    }
+
     /// Right- and middle-drag always pan, so a mouse user never needs a
-    /// modifier key.
+    /// modifier key. A right-click that doesn't move opens the menu.
+    override func rightMouseDown(with event: NSEvent) {
+        rightPressOrigin = convert(event.locationInWindow, from: nil)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        defer { rightPressOrigin = nil }
+        let end = convert(event.locationInWindow, from: nil)
+        guard let origin = rightPressOrigin,
+              hypot(end.x - origin.x, end.y - origin.y) <= 4,
+              let menu = menuForRightClick?(end)
+        else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
     override func rightMouseDragged(with event: NSEvent) {
         onPanDrag?(event.deltaX, event.deltaY)
     }
@@ -162,7 +214,11 @@ private struct SceneKitContainerView: NSViewRepresentable {
     /// the scene object, either of which may be nil. Both are reported
     /// rather than resolved here because which one wins depends on whether
     /// export-selection mode is on, which this view doesn't know about.
-    let onClick: (_ fixtureID: String?, _ objectID: String?) -> Void
+    let onClick: (_ fixtureID: String?, _ objectID: String?, _ shift: Bool) -> Void
+    /// The fixtures inside a Shift-drag box, and where the drag ended in
+    /// SwiftUI's top-left coordinates.
+    let onBoxSelect: (_ fixtureIDs: [String], _ end: CGPoint) -> Void
+    let menuForRightClick: () -> NSMenu?
 
     func makeNSView(context: Context) -> SCNView {
         let view = HoverTrackingSCNView()
@@ -190,12 +246,28 @@ private struct SceneKitContainerView: NSViewRepresentable {
         view.onOrbitDrag = onOrbitDrag
         view.onPanDrag = onPanDrag
         view.onZoom = onZoom
-        view.onClick = { [weak view] point in
+        view.onClick = { [weak view] point, shift in
             guard let view else { return }
             onClick(
                 Self.fixtureID(at: point, in: view, markersRoot: markersRoot, markerNodes: markerNodes),
-                Self.sceneObjectID(at: point, in: view))
+                Self.sceneObjectID(at: point, in: view),
+                shift)
         }
+        view.onBoxSelect = { [weak view] rect in
+            guard let view else { return }
+            // Every visible fixture whose centre lands inside the box and
+            // in front of the camera.
+            let inside = markerNodes.compactMap { id, node -> String? in
+                guard !node.isHidden else { return nil }
+                let projected = view.projectPoint(node.presentation.worldPosition)
+                guard projected.z > 0, projected.z < 1,
+                      rect.contains(CGPoint(x: projected.x, y: projected.y))
+                else { return nil }
+                return id
+            }
+            onBoxSelect(inside, CGPoint(x: rect.maxX, y: view.bounds.height - rect.midY))
+        }
+        view.menuForRightClick = { _ in menuForRightClick() }
 
         DispatchQueue.main.async {
             onViewReady(view)
@@ -307,6 +379,23 @@ struct Fixture3DView: View {
     /// Source file, kept so scene geometry can be loaded from it on a
     /// background task rather than during init.
     private let mvrURL: URL?
+    /// The document itself, for the fixture editor a click opens, and so
+    /// the hover card shows a fixture as it is now rather than as it was
+    /// when the viewer opened.
+    private let document: MVRDocument
+    /// The fixtures picked: a click picks one, Shift-click adds or takes
+    /// one away, a Shift-drag box adds what's inside it. The editor is open
+    /// on them whenever there are any.
+    @State private var pickedFixtures: Set<String> = []
+    /// Where the editor sits: by the last click or the end of the box.
+    @State private var editAnchor: CGPoint = .zero
+    /// Where the editor was dragged to, out of the way of the rig. Kept
+    /// while it stays open, so picking more fixtures doesn't pull it back.
+    @State private var editorPosition: CGPoint?
+    @State private var editorDragStart: CGPoint?
+    /// Fixtures deleted from the editor. The scene was built when the
+    /// viewer opened, so their markers are hidden rather than removed.
+    @State private var deletedFixtureIDs: Set<String> = []
 
     private func suggestedFileName(for format: MVRGeometryExport.Format) -> String {
         let base = mvrURL.map { $0.deletingPathExtension().lastPathComponent } ?? "Scene Geometry"
@@ -387,6 +476,7 @@ struct Fixture3DView: View {
         self.onSelectFixture = onSelectFixture
         self.autoIDGroups = autoIDGroups
         self.mvrURL = document.originalFileURL
+        self.document = document
 
         let specs = Set(fixtures.map(\.gdtfSpec)).sorted()
         self.sortedSpecs = specs
@@ -443,11 +533,7 @@ struct Fixture3DView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Text("3D View")
-                .font(.headline)
-
-            Divider().frame(height: 20)
+        ToolHeader("3D Viewer", onBack: onClose) {
 
             Picker("Projection", selection: $isOrthographic) {
                 Text("Perspective").tag(false)
@@ -475,7 +561,7 @@ struct Fixture3DView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 150)
-            .help("Draw fixtures as their real GDTF geometry, or as plain marker spheres.")
+            .help("Show real fixture models or simple dots.")
             .onChange(of: showRealFixtureGeometry) { _, _ in
                 applyFixtureRepresentation()
             }
@@ -513,7 +599,7 @@ struct Fixture3DView: View {
                 .disabled(sceneGeometryNode == nil)
                 .help(sceneGeometryNode == nil
                       ? "This MVR has no scene geometry to export."
-                      : "Click objects in the view, or whole layers in the scene explorer, to mark them for export.")
+                      : "Click objects or layers to select them for export.")
                 .fixedSize()
             }
 
@@ -527,10 +613,8 @@ struct Fixture3DView: View {
             }
             Text("\(positionedCount) of \(fixtures.count) fixtures positioned")
                 .foregroundStyle(.secondary)
-            Button("Close", action: onClose)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 
     /// A view-cube-style 3x2 grid so opposite faces (Front/Back,
@@ -750,7 +834,7 @@ struct Fixture3DView: View {
                         .buttonStyle(.link)
                 }
             }
-            Text("Click objects in the view, or click a layer to select all objects in that layer.")
+            Text("Click objects, or a layer to select all of it.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -907,6 +991,7 @@ struct Fixture3DView: View {
     private func applyLayerVisibility() {
         for fixture in fixtures {
             markerNodesByFixtureID[fixture.id]?.isHidden = hiddenLayerUUIDs.contains(fixture.layerUUID.lowercased())
+                || deletedFixtureIDs.contains(fixture.id)
         }
         if let geometryRoot = sceneGeometryNode {
             geometryRoot.isHidden = !showSceneGeometry
@@ -1004,34 +1089,81 @@ struct Fixture3DView: View {
                     onZoom: { deltaY, point in
                         handleZoom(deltaY: deltaY, at: point)
                     },
-                    onClick: { fixtureID, objectID in
+                    onClick: { fixtureID, objectID, shift in
                         // Export selection owns the click while its mode is
                         // on — otherwise a fixture standing in front of the
                         // set piece being aimed at would steal it. Outside
-                        // that mode, clicking a fixture reveals it in the
-                        // table, and clicking geometry does nothing, so
-                        // ordinary orbiting never changes anything.
+                        // that mode a click picks a fixture for the editor,
+                        // and a click on nothing puts the selection down.
                         if isSelectingForExport {
                             guard let objectID else { return }
                             toggleSelection(objectID: objectID)
                         } else if let fixtureID {
+                            editAnchor = hoverPoint
+                            var next = pickedFixtures
+                            if shift {
+                                if next.contains(fixtureID) { next.remove(fixtureID) } else { next.insert(fixtureID) }
+                            } else {
+                                next = [fixtureID]
+                            }
+                            setPicked(next)
                             onSelectFixture(fixtureID)
+                        } else if !shift {
+                            setPicked([])
                         }
-                    }
+                    },
+                    onBoxSelect: { ids, end in
+                        guard !isSelectingForExport, !ids.isEmpty else { return }
+                        editAnchor = end
+                        setPicked(pickedFixtures.union(ids))
+                    },
+                    menuForRightClick: { typeMenu() }
                 )
                 .onChange(of: showSceneGeometry) { _, _ in
                     applyLayerVisibility()
                 }
 
-                if let hoveredFixture {
-                    hoverCard(for: hoveredFixture)
+                if let hoveredFixture, pickedFixtures.isEmpty {
+                    hoverCard(for: document.fixtures.first { $0.id == hoveredFixture.id } ?? hoveredFixture)
                         .position(
                             x: min(hoverPoint.x + 150, geo.size.width - 110),
                             y: min(hoverPoint.y + 80, geo.size.height - 80)
                         )
                         .allowsHitTesting(false)
                 }
+
+                // The same editor the ID map opens, on the fixture clicked,
+                // beside where the click was and kept inside the view.
+                if !pickedFixtures.isEmpty {
+                    FixtureEditor(
+                        document: document,
+                        fixtureIDs: orderedPicked,
+                        scope: pickedFixtures.count > 1 ? .together : .each
+                    ) {
+                        hideDeleted()
+                        setPicked([])
+                    }
+                    // A fresh editor for each selection, so its fields
+                    // reload rather than showing the last one's values.
+                    .id(pickedFixtures)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.3)))
+                    .shadow(radius: 12, y: 4)
+                    .position(editorCentre(in: geo.size))
+                    // Dragged by anything that isn't a field or a button.
+                    .gesture(
+                        DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.viewerSpace))
+                            .onChanged { drag in
+                                let start = editorDragStart ?? editorCentre(in: geo.size)
+                                editorDragStart = start
+                                editorPosition = CGPoint(
+                                    x: start.x + drag.translation.width,
+                                    y: start.y + drag.translation.height)
+                            }
+                            .onEnded { _ in editorDragStart = nil })
+                }
             }
+            .coordinateSpace(.named(Self.viewerSpace))
         }
     }
 
@@ -1081,18 +1213,88 @@ struct Fixture3DView: View {
     /// of the hover card, which can land far from the marker at the edges
     /// of the view.
     private func setHighlighted(_ isHighlighted: Bool, fixtureID: String?) {
-        guard let fixtureID, let node = markerNodesByFixtureID[fixtureID] else { return }
+        guard let fixtureID else { return }
+        applyLook(toFixture: fixtureID, hovered: isHighlighted)
+    }
+
+    /// A marker's look from its state: hovered is bright white and large,
+    /// picked is the accent colour and a little larger, otherwise its
+    /// type's colour. Hover wins, and leaving a picked fixture puts it back
+    /// to picked rather than to plain.
+    private func applyLook(toFixture fixtureID: String, hovered: Bool) {
+        guard let node = markerNodesByFixtureID[fixtureID] else { return }
         let baseColor = markerColorsByFixtureID[fixtureID] ?? .white
+        let picked = pickedFixtures.contains(fixtureID)
+        let emission: NSColor = hovered ? .white
+            : picked ? .controlAccentColor
+            : baseColor.withAlphaComponent(0.3)
+        let scale: CGFloat = hovered ? 1.8 : picked ? 1.3 : 1
 
         SCNTransaction.begin()
         SCNTransaction.animationDuration = 0.12
         // Real GDTF meshes are multi-part (base/yoke/head), so every part
         // under this fixture's root needs the glow, not just one material.
         node.enumerateHierarchy { child, _ in
-            child.geometry?.firstMaterial?.emission.contents = isHighlighted ? NSColor.white : baseColor.withAlphaComponent(0.3)
+            child.geometry?.firstMaterial?.emission.contents = emission
         }
-        node.scale = isHighlighted ? SCNVector3(1.8, 1.8, 1.8) : SCNVector3(1, 1, 1)
+        node.scale = SCNVector3(scale, scale, scale)
         SCNTransaction.commit()
+    }
+
+    /// Changes the picked fixtures and relights only the ones that changed.
+    private static let viewerSpace = "viewer3D"
+
+    /// Beside the click, or where it was dragged to, and kept inside the
+    /// view either way.
+    private func editorCentre(in size: CGSize) -> CGPoint {
+        let wanted = editorPosition ?? CGPoint(x: editAnchor.x + 180, y: editAnchor.y)
+        return CGPoint(
+            x: min(max(wanted.x, 170), max(170, size.width - 170)),
+            y: min(max(wanted.y, 170), max(170, size.height - 170)))
+    }
+
+    private func setPicked(_ next: Set<String>) {
+        let changed = pickedFixtures.symmetricDifference(next)
+        pickedFixtures = next
+        if next.isEmpty { editorPosition = nil }
+        for id in changed {
+            applyLook(toFixture: id, hovered: id == hoveredFixture?.id)
+        }
+    }
+
+    /// The picked fixtures in ID order, which a bulk renumber follows.
+    private var orderedPicked: [String] {
+        document.fixtures
+            .filter { pickedFixtures.contains($0.id) }
+            .sorted { ($0.currentFixtureID ?? .max) < ($1.currentFixtureID ?? .max) }
+            .map(\.id)
+    }
+
+    /// Hides the markers of fixtures the editor deleted.
+    private func hideDeleted() {
+        let alive = Set(document.fixtures.map(\.id))
+        for (id, node) in markerNodesByFixtureID where !alive.contains(id) {
+            node.isHidden = true
+            deletedFixtureIDs.insert(id)
+        }
+    }
+
+    /// The right-click menu: narrow the selection to one type.
+    private func typeMenu() -> NSMenu? {
+        let picked = document.fixtures.filter { pickedFixtures.contains($0.id) }
+        guard !picked.isEmpty else { return nil }
+        let menu = NSMenu()
+        let bySpec = Dictionary(grouping: picked, by: \.gdtfSpec)
+        if bySpec.count > 1 {
+            for spec in bySpec.keys.sorted() {
+                let ids = Set((bySpec[spec] ?? []).map(\.id))
+                menu.addItem(ClosureMenuItem(
+                    title: "Only \(GDTFSpecName.readable(spec)) (\(ids.count))") { setPicked(ids) })
+            }
+            menu.addItem(.separator())
+        }
+        menu.addItem(ClosureMenuItem(title: "Clear Selection") { setPicked([]) })
+        return menu
     }
 
     @ViewBuilder
@@ -1112,7 +1314,7 @@ struct Fixture3DView: View {
                 .foregroundStyle(.secondary)
             Text("Smart Auto ID preview")
                 .font(.callout.weight(.medium))
-            Text("Each box is one group. The line and arrows run in the order IDs are assigned, starting at the dot.")
+            Text("Each box is a group. Arrows show the ID order, starting at the dot.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -1390,7 +1592,9 @@ struct Fixture3DView: View {
         return image
     }
 
-    private static func buildScene(
+    /// Internal rather than private so the PDF's stage render is built
+    /// from exactly the scene the viewer shows.
+    static func buildScene(
         fixtures: [MVRFixture],
         specColorIndex: [String: Int],
         specCount: Int,
@@ -1677,8 +1881,8 @@ struct Fixture3DView: View {
 
     /// Names of the two representations held under every fixture node, so
     /// the toggle can find them without walking geometry.
-    private static let detailedNodeName = "fixtureDetailed"
-    private static let bubbleNodeName = "fixtureBubble"
+    static let detailedNodeName = "fixtureDetailed"
+    static let bubbleNodeName = "fixtureBubble"
 
     /// Radius of a marker sphere, in metres. Deliberately fixed rather than
     /// scaled per fixture — abstracting away the real size is the whole
@@ -1775,3 +1979,18 @@ struct Fixture3DView: View {
     }
 }
 
+
+/// A menu item that runs a closure, for menus built in code.
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func fire() { handler() }
+}

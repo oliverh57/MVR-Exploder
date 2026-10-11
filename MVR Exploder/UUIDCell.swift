@@ -7,10 +7,11 @@ import SwiftUI
 struct UUIDCell: View {
     let uuid: String
     let color: Color
+    var label = "UUID"
     @State private var isHovering = false
 
     var body: some View {
-        Text("UUID")
+        Text(label)
             .foregroundStyle(color)
             .contentShape(Rectangle())
             .onHover { hovering in

@@ -2,21 +2,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+/// The fixture table for the open file, every field editable.
+///
+/// Works on the app's one document, so what's changed here is already in
+/// the 3D view, the ID map and every other tool the moment you go back —
+/// and leaving never asks, because nothing is lost by it. Opening a file
+/// and writing one out are on the tools page.
 struct SingleEditView: View {
+    @ObservedObject var document: MVRDocument
+    /// Fixtures to pick out on arrival, from a click in the 3D view or the
+    /// ID map on the tools page.
+    var reveal: Set<String> = []
     let onBack: () -> Void
-
-    @StateObject private var document = MVRDocument()
-
-    @State private var isTargeted = false
-    @State private var errorMessage: String?
-
-    // Drag-and-drop → ask which field holds the fixture ID before loading,
-    // but only when the file itself is actually ambiguous about it.
-    @State private var pendingDropURL: URL?
-    @State private var showFieldChoiceDialog = false
-
-    @State private var showImportSummary = false
-    @State private var importSummaryMessage = ""
 
     @State private var showOffsetSheet = false
     @State private var offsetInput = ""
@@ -24,19 +21,10 @@ struct SingleEditView: View {
     @State private var showUniverseOffsetSheet = false
     @State private var universeOffsetInput = ""
 
-    @State private var showExportSheet = false
-    @State private var includeSceneGeometry = true
-    @State private var assignLayersByFixtureType = false
-    @State private var replaceAllWithDummyGDTFs = false
-    @State private var cleanupEmptyClassesAndLayers = false
-
-    @State private var showPatchPDFLayoutChoice = false
-
     @State private var showRegenerateUUIDConfirm = false
     @State private var showRemoveUnpatchedConfirm = false
-    @State private var showFixtureIDMap = false
-    @State private var showPatchCheck = false
-    @StateObject private var viewer3D = Fixture3DWindowPresenter()
+    // Patch Check is switched off until its findings can be trusted.
+    // @State private var showPatchCheck = false
     @State private var selectedFixtureIDs: Set<String> = []
     @State private var recentlyJumpedIDs: Set<String> = []
     @State private var sortOrder: [KeyPathComparator<MVRFixture>] = []
@@ -58,34 +46,16 @@ struct SingleEditView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if document.fixtures.isEmpty {
-                dropZone
-            } else {
-                topBar
-                Divider()
-                filterBar
-                Divider()
-                fixturesTable
-                Divider()
-                bottomBar
-            }
+            topBar
+            Divider()
+            filterBar
+            Divider()
+            fixturesTable
+            Divider()
+            bottomBar
         }
-        .onDrop(of: [.fileURL], isTargeted: $isTargeted, perform: handleDrop)
-        .confirmationDialog(
-            "Which field holds each fixture's ID in this file?",
-            isPresented: $showFieldChoiceDialog,
-            titleVisibility: .visible
-        ) {
-            Button("FixtureID") { loadPendingDrop(idFieldName: "FixtureID") }
-            Button("UnitNumber (Channel)") { loadPendingDrop(idFieldName: "UnitNumber") }
-            Button("Cancel", role: .cancel) { pendingDropURL = nil }
-        } message: {
-            Text("This file has real data in both fields, so it can't be inferred automatically — most MVR exporters use FixtureID, some use UnitNumber (also called Channel on some consoles).")
-        }
-        .alert("Import Successful", isPresented: $showImportSummary) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(importSummaryMessage)
+        .onAppear {
+            if !reveal.isEmpty { revealFixtures(ids: reveal) }
         }
         .sheet(isPresented: $showOffsetSheet) {
             offsetSheet
@@ -93,31 +63,13 @@ struct SingleEditView: View {
         .sheet(isPresented: $showUniverseOffsetSheet) {
             universeOffsetSheet
         }
-        .sheet(isPresented: $showExportSheet) {
-            exportSheet
-        }
-        .sheet(isPresented: $showPatchCheck) {
-            PatchCheckView(
-                document: document,
-                onClose: { showPatchCheck = false },
-                onSelectFixtures: { revealFixtures(ids: $0) })
-        }
-        .sheet(isPresented: $showFixtureIDMap) {
-            FixtureIDMapView(fixtures: document.fixtures) {
-                showFixtureIDMap = false
-            } onSelectID: { fixtureID in
-                jumpToFixture(withID: fixtureID)
-            }
-        }
-    }
-
-    /// Reveals every fixture carrying this Fixture ID — so a clash
-    /// highlights both rows, not just the first.
-    private func jumpToFixture(withID fixtureID: Int) {
-        let matches = document.fixtures.filter { ($0.currentFixtureID ?? 0) == fixtureID }
-        showFixtureIDMap = false
-        guard !matches.isEmpty else { return }
-        revealFixtures(ids: Set(matches.map(\.id)))
+        // Patch Check is switched off until its findings can be trusted.
+        // .sheet(isPresented: $showPatchCheck) {
+        //     PatchCheckView(
+        //         document: document,
+        //         onClose: { showPatchCheck = false },
+        //         onSelectFixtures: { revealFixtures(ids: $0) })
+        // }
     }
 
     /// Scrolls the table to these fixtures and marks them.
@@ -190,87 +142,12 @@ struct SingleEditView: View {
         }
     }
 
-    private var dropZone: some View {
-        VStack(spacing: 12) {
-            Button("← Mode") { onBack() }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer()
-
-            Image(systemName: "square.and.arrow.down.on.square")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
-            Text("Drag an .mvr file here")
-                .font(.title2)
-            if let errorMessage {
-                Text(errorMessage)
-                    .foregroundStyle(.red)
-                    .font(.callout)
-            }
-
-            Spacer()
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(isTargeted ? Color.accentColor.opacity(0.1) : Color.clear)
-    }
-
+    // The 3D view, the ID map, the patch PDF and exporting are on the
+    // tools page; Patch Check is switched off until its findings can be
+    // trusted.
+    // Button("Patch Check…") { showPatchCheck = true }
     private var topBar: some View {
-        HStack {
-            Button("← Mode") { onBack() }
-
-            Button("Clear") {
-                document.clear()
-                errorMessage = nil
-            }
-
-            Text(document.fileName)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button("Fixture ID Map…") {
-                showFixtureIDMap = true
-            }
-            .disabled(document.fixtures.isEmpty)
-
-            Button("Patch Check…") {
-                showPatchCheck = true
-            }
-            .disabled(document.fixtures.isEmpty)
-
-            Button("View 3D…") {
-                viewer3D.present(
-                    fixtures: document.fixtures,
-                    document: document,
-                    fileName: document.fileName
-                ) { fixtureID in
-                    revealFixtures(ids: [fixtureID])
-                }
-            }
-            .disabled(document.fixtures.isEmpty)
-
-            Button("Export Patch PDF…") {
-                showPatchPDFLayoutChoice = true
-            }
-            .disabled(document.fixtures.isEmpty)
-            .confirmationDialog(
-                "Lay out the patch PDF by…",
-                isPresented: $showPatchPDFLayoutChoice,
-                titleVisibility: .visible
-            ) {
-                Button("Fixture Type") { presentSavePanelAndExportPatchPDF(layout: .byFixtureType) }
-                Button("Fixture ID") { presentSavePanelAndExportPatchPDF(layout: .byFixtureID) }
-                Button("Cancel", role: .cancel) {}
-            }
-
-            Button("Export MVR…") {
-                showExportSheet = true
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-        }
-        .padding(10)
+        ToolHeader("Single Edit", onBack: onBack)
     }
 
     private var filteredFixtures: [MVRFixture] {
@@ -412,30 +289,10 @@ struct SingleEditView: View {
         EditableCell(
             isEdited: fixture.isEdited(field),
             editText: text,
-            validate: { Self.validate($0, for: field) },
+            validate: { field.validate($0) },
             onCommit: { apply($0, to: field, of: fixture) },
             onReset: { document.resetField(field, forFixtureAtID: fixture.id) },
             content: content)
-    }
-
-    private static func validate(_ value: String, for field: MVRFixtureField) -> String? {
-        switch field {
-        case .name, .mode:
-            return value.isEmpty ? "Cannot be empty." : nil
-        case .uuid:
-            return value.isEmpty ? "Cannot be empty." : nil
-        case .fixtureID:
-            guard let number = Int(value) else { return "Must be a whole number." }
-            return number < 0 ? "Cannot be negative." : nil
-        case .universe:
-            guard let number = Int(value) else { return "Must be a whole number." }
-            return number < 1 ? "Universe starts at 1." : nil
-        case .channel:
-            guard let number = Int(value) else { return "Must be a whole number." }
-            return (1...512).contains(number) ? nil : "Channel must be between 1 and 512."
-        case .layer:
-            return nil
-        }
     }
 
     /// Writes a validated value back through the document.
@@ -485,10 +342,6 @@ struct SingleEditView: View {
 
     private var bottomBar: some View {
         HStack(spacing: 12) {
-            if let errorMessage {
-                Text(errorMessage).foregroundStyle(.red)
-            }
-
             Spacer()
 
             Text("\(document.fixtures.count) fixtures")
@@ -523,7 +376,7 @@ struct SingleEditView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This replaces every fixture's uuid. Use Reset Changes to undo before exporting.")
+                Text("Every fixture gets a new UUID. Reset Changes undoes it.")
             }
 
             Button("Remove All Non-Patched Fixtures…") {
@@ -531,7 +384,7 @@ struct SingleEditView: View {
             }
             .disabled(document.fixtures.isEmpty)
             .confirmationDialog(
-                "What counts as a non-patched fixture?",
+                "Remove fixtures with…",
                 isPresented: $showRemoveUnpatchedConfirm,
                 titleVisibility: .visible
             ) {
@@ -546,7 +399,7 @@ struct SingleEditView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("No DMX Patch means Universe 1, Address 0. No Fixture ID means Fixture ID 0. Choose which definition to delete by.")
+                Text("No patch means Universe 1, Address 0. No ID means Fixture ID 0.")
             }
         }
         .padding(10)
@@ -556,7 +409,7 @@ struct SingleEditView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Offset Fixture IDs")
                 .font(.headline)
-            Text("Enter an amount to add to every fixture's ID. Use a negative number to decrease.")
+            Text("Added to every Fixture ID. Use a negative number to go down.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             TextField("Offset amount", text: $offsetInput)
@@ -584,7 +437,7 @@ struct SingleEditView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Offset Universe")
                 .font(.headline)
-            Text("Enter a number of universes to shift every fixture's DMX address by. Use a negative number to decrease.")
+            Text("Moves every fixture by this many universes. Use a negative number to go down.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             TextField("Offset amount", text: $universeOffsetInput)
@@ -607,180 +460,8 @@ struct SingleEditView: View {
         .padding(24)
         .frame(width: 340)
     }
-
-    private var exportSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Export MVR")
-                .font(.headline)
-
-            Toggle("Include scene geometry", isOn: $includeSceneGeometry)
-            Text("When off, the exported file keeps only fixture and GDTF data — 3D venue geometry (files and <SceneObject> entries) is left out.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Assign fixture layers by type", isOn: $assignLayersByFixtureType)
-            Text("Groups fixtures into layers named after their GDTF spec. Everything else moves into a layer named \"NONE\".")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Replace all fixtures with dummy GDTFs", isOn: $replaceAllWithDummyGDTFs)
-            Text("Swaps every fixture's GDTF for a generated placeholder, even if the real one is present. Fixtures already missing a GDTF always get a placeholder regardless of this setting.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("Cleanup empty classes and layers", isOn: $cleanupEmptyClassesAndLayers)
-            Text("Removes any layer with no objects in it, and any class no object references.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                Spacer()
-                Button("Cancel") { showExportSheet = false }
-                Button("Choose Location & Export…") {
-                    showExportSheet = false
-                    presentSavePanelAndExport()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(24)
-        .frame(width: 420)
-    }
-
-    private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
-            guard
-                let data = item as? Data,
-                let url = URL(dataRepresentation: data, relativeTo: nil),
-                url.pathExtension.lowercased() == "mvr"
-            else {
-                DispatchQueue.main.async {
-                    self.errorMessage = "Please drop a valid .mvr file."
-                }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.pendingDropURL = url
-
-                // Only ask when the file genuinely doesn't say which field
-                // is real: if just one of FixtureID/UnitNumber actually has
-                // non-zero values, that's the answer, and asking anyway
-                // would just be friction for no reason.
-                switch MVRDocument.detectIDField(at: url) {
-                case .determined(let fieldName):
-                    self.loadPendingDrop(idFieldName: fieldName)
-                case .ambiguous:
-                    self.showFieldChoiceDialog = true
-                }
-            }
-        }
-
-        return true
-    }
-
-    private func loadPendingDrop(idFieldName: String) {
-        guard let url = pendingDropURL else { return }
-        pendingDropURL = nil
-
-        do {
-            try document.load(from: url, idFieldName: idFieldName)
-            errorMessage = nil
-            presentImportSummary(idFieldName: idFieldName)
-        } catch {
-            errorMessage = "Failed to parse MVR file: \(error.localizedDescription)"
-        }
-    }
-
-    /// Builds and shows the post-import summary — fixture count, which ID
-    /// field was used (and whether that was auto-detected or picked by the
-    /// user), and a couple of stats worth knowing right away.
-    private func presentImportSummary(idFieldName: String) {
-        let fixtures = document.fixtures
-        let total = fixtures.count
-        let typeCount = Set(fixtures.map(\.gdtfSpec)).count
-        let noPatchCount = fixtures.filter { $0.hasNoDMXPatch }.count
-        let noIDCount = fixtures.filter { $0.hasNoFixtureID }.count
-        let universeCount = Set(
-            fixtures.compactMap { fixture in
-                fixture.currentAddress.map { MVRFixture.universeAndChannel(fromAbsoluteAddress: $0).universe }
-            }
-        ).count
-
-        let fieldLabel = idFieldName == "UnitNumber" ? "UnitNumber (Channel)" : "FixtureID"
-        var lines = ["\(total) fixture\(total == 1 ? "" : "s") imported using \(fieldLabel) as the ID field."]
-
-        var stats: [String] = []
-        stats.append("\(typeCount) fixture type\(typeCount == 1 ? "" : "s")")
-        if universeCount > 0 {
-            stats.append("\(universeCount) universe\(universeCount == 1 ? "" : "s")")
-        }
-        lines.append(stats.joined(separator: ", ") + ".")
-
-        if noPatchCount > 0 {
-            lines.append("\(noPatchCount) fixture\(noPatchCount == 1 ? "" : "s") with no DMX patch.")
-        }
-        if noIDCount > 0 {
-            lines.append("\(noIDCount) fixture\(noIDCount == 1 ? "" : "s") with no \(fieldLabel).")
-        }
-
-        importSummaryMessage = lines.joined(separator: "\n")
-        showImportSummary = true
-    }
-
-    private func presentSavePanelAndExport() {
-        let panel = NSSavePanel()
-        let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.prepareForExport(named: "\(baseName)_edited", fileExtension: "mvr")
-
-        let options = MVRExportOptions(
-            includeSceneGeometry: includeSceneGeometry,
-            assignLayersByFixtureType: assignLayersByFixtureType,
-            replaceAllWithDummyGDTFs: replaceAllWithDummyGDTFs,
-            cleanupEmptyClassesAndLayers: cleanupEmptyClassesAndLayers
-        )
-
-        panel.begin { response in
-            guard response == .OK, let destinationURL = panel.url else { return }
-            do {
-                try MVRExporter.export(document, to: destinationURL.ensuringPathExtension("mvr"), options: options)
-            } catch {
-                DispatchQueue.main.async {
-                    self.errorMessage = "Export failed: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    private func presentSavePanelAndExportPatchPDF(layout: PatchPDFLayout) {
-        let panel = NSSavePanel()
-        let baseName = (document.fileName as NSString).deletingPathExtension
-        panel.prepareForExport(named: "\(baseName)_patch", fileExtension: "pdf")
-
-        let fixtures = document.fixtures
-        let title = "Patch List — \(document.fileName)"
-
-        panel.begin { response in
-            guard response == .OK, let destinationURL = panel.url else { return }
-            do {
-                try MVRPatchPDFExporter.export(fixtures: fixtures, layout: layout, documentTitle: title, to: destinationURL.ensuringPathExtension("pdf"))
-            } catch {
-                DispatchQueue.main.async {
-                    self.errorMessage = "Patch PDF export failed: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
 }
 
 #Preview {
-    SingleEditView(onBack: {})
+    SingleEditView(document: MVRDocument(), onBack: {})
 }

@@ -108,39 +108,64 @@ struct DisguisePixelMap {
 
         /// Cell indices in the order the pixels are counted: `sequence[0]`
         /// is the cell that holds pixel 1.
-        var sequence: [Int] {
+        ///
+        /// Read off the fixture as it's turned on screen. "Top left" is the
+        /// top-left you can see and "Rows" run along the rows you can see;
+        /// counting on the unturned fixture put pixel 1 in the top-right
+        /// corner of a fixture turned 90°, under a menu saying top left.
+        func sequence(rotation: Rotation = .none) -> [Int] {
+            let width = rotation.isUpright ? rows : columns
+            let height = rotation.isUpright ? columns : rows
+
+            // Which of the fixture's own cells is drawn at each square of
+            // the turned grid, by the same mapping the CSV uses.
+            var cellAt = [Int](repeating: 0, count: width * height)
+            for row in 0..<rows {
+                for column in 0..<columns {
+                    let at = DisguisePixelMap.position(
+                        column: column, row: row, block: self, rotation: rotation)
+                    cellAt[at.y * width + at.x] = row * columns + column
+                }
+            }
+
             // Walked from the top left, then folded over to start from
             // whichever corner was asked for — the walk and the corner
             // are separate questions, and mirroring is all the corner is.
-            func cell(_ column: Int, _ row: Int) -> Int {
-                let column = start.mirrorsColumns ? columns - 1 - column : column
-                let row = start.mirrorsRows ? rows - 1 - row : row
-                return row * columns + column
+            func cell(_ x: Int, _ y: Int) -> Int {
+                let x = start.mirrorsColumns ? width - 1 - x : x
+                let y = start.mirrorsRows ? height - 1 - y : y
+                return cellAt[y * width + x]
             }
 
             switch order {
             case .rows, .rowsZigZag:
-                return (0..<rows).flatMap { row -> [Int] in
-                    let line = (0..<columns).map { cell($0, row) }
-                    return order == .rowsZigZag && row % 2 == 1 ? line.reversed() : line
+                return (0..<height).flatMap { y -> [Int] in
+                    let line = (0..<width).map { cell($0, y) }
+                    return order == .rowsZigZag && y % 2 == 1 ? line.reversed() : line
                 }
             case .columns, .columnsZigZag:
-                return (0..<columns).flatMap { column -> [Int] in
-                    let line = (0..<rows).map { cell(column, $0) }
-                    return order == .columnsZigZag && column % 2 == 1 ? line.reversed() : line
+                return (0..<width).flatMap { x -> [Int] in
+                    let line = (0..<height).map { cell(x, $0) }
+                    return order == .columnsZigZag && x % 2 == 1 ? line.reversed() : line
                 }
             }
         }
 
+        /// The count unturned.
+        var sequence: [Int] { sequence(rotation: .none) }
+
         /// Where each cell falls in that count: `ranks[cell]` is 0 for the
         /// cell holding pixel 1.
-        var ranks: [Int] {
+        func ranks(rotation: Rotation = .none) -> [Int] {
             var result = [Int](repeating: 0, count: cellCount)
-            for (rank, cell) in sequence.enumerated() where result.indices.contains(cell) {
+            for (rank, cell) in sequence(rotation: rotation).enumerated()
+                where result.indices.contains(cell) {
                 result[cell] = rank
             }
             return result
         }
+
+        var ranks: [Int] { ranks(rotation: .none) }
 
         var cellCount: Int { rows * columns }
         var filledCount: Int { offsets.compactMap { $0 }.count }
@@ -180,11 +205,13 @@ struct DisguisePixelMap {
         /// predict the rest. Cells already filled in are left alone: a
         /// pixel somebody typed is an answer, and a suggestion that
         /// painted over it would lose work on a slip.
-        func suggestions(anchor: Int, value: Int, step: Int) -> [Int: Int] {
+        func suggestions(
+            anchor: Int, value: Int, step: Int, rotation: Rotation = .none
+        ) -> [Int: Int] {
             guard offsets.indices.contains(anchor), step != 0 else { return [:] }
             // Counted along the pixel order, so a snaking fixture's
             // suggestions snake with it.
-            let ranks = self.ranks
+            let ranks = self.ranks(rotation: rotation)
             let anchorRank = ranks[anchor]
             var result: [Int: Int] = [:]
             for index in offsets.indices where index != anchor && offsets[index] == nil {
@@ -197,8 +224,8 @@ struct DisguisePixelMap {
 
         /// The gap the grid itself implies, from the last two cells filled
         /// in. One RGB pixel when there aren't two to compare.
-        func inferredStep(fallback: Int = 3) -> Int {
-            let ranks = self.ranks
+        func inferredStep(fallback: Int = 3, rotation: Rotation = .none) -> Int {
+            let ranks = self.ranks(rotation: rotation)
             let filled = offsets.enumerated()
                 .compactMap { index, value in value.map { (rank: ranks[index], value: $0) } }
                 .sorted { $0.rank < $1.rank }
@@ -339,7 +366,7 @@ struct DisguisePixelMap {
         var pixels: [Pixel] = []
         pixels.reserveCapacity(placements.count * block.cellCount)
 
-        let sequence = block.sequence
+        let sequence = block.sequence(rotation: rotation)
         for placement in placements {
             for index in sequence {
                 let column = index % block.columns

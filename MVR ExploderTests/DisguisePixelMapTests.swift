@@ -594,24 +594,44 @@ final class PixelStartCornerTests: XCTestCase {
         }
     }
 
-    /// The reason the corner exists: turned 90°, a line counted from the
-    /// top left puts pixel 1 on the *right* of the screen. Starting from
-    /// the bottom left brings it back to the left.
-    func testTurnedNinetyDegreesTheBottomLeftPutsPixelOneOnTheLeft() {
-        func firstPixelX(_ start: DisguisePixelMap.PixelStart) -> Int {
-            var line = DisguisePixelMap.Block(columns: 16, rows: 2, start: start)
-            for index in 0..<line.cellCount {
-                let cell = line.sequence[index]
-                line.setOffset(1 + index * 3, column: cell % 16, row: cell / 16)
-            }
-            let pixels = DisguisePixelMap.pixels(
-                placements: DisguisePixelMap.placements(
-                    addresses: [1], block: line, rotation: .quarter),
-                block: line, rotation: .quarter)
-            return pixels[0].x
+    /// Where pixel 1 and pixel 2 land on screen, for a 16 × 2 line.
+    private func firstTwo(
+        _ start: DisguisePixelMap.PixelStart,
+        order: DisguisePixelMap.PixelOrder = .rows,
+        rotation: DisguisePixelMap.Rotation
+    ) -> [[Int]] {
+        var line = DisguisePixelMap.Block(columns: 16, rows: 2, order: order, start: start)
+        let sequence = line.sequence(rotation: rotation)
+        for (rank, cell) in sequence.enumerated() {
+            line.setOffset(1 + rank * 3, column: cell % 16, row: cell / 16)
         }
+        let pixels = DisguisePixelMap.pixels(
+            placements: DisguisePixelMap.placements(addresses: [1], block: line, rotation: rotation),
+            block: line, rotation: rotation)
+        return pixels.prefix(2).map { [$0.x, $0.y] }
+    }
 
-        XCTAssertEqual(firstPixelX(.topLeft), 1, "on the right, as reported")
-        XCTAssertEqual(firstPixelX(.bottomLeft), 0, "and now on the left")
+    /// The reported bug: turned 90°, "Top left" put pixel 1 top-right,
+    /// because the corner was read off the unturned fixture. The corner is
+    /// the one on screen, whichever way round the fixture is.
+    func testTheCornerIsTheOneOnScreenAtEveryRotation() {
+        for rotation in DisguisePixelMap.Rotation.allCases {
+            let width = rotation.isUpright ? 2 : 16
+            let height = rotation.isUpright ? 16 : 2
+            XCTAssertEqual(firstTwo(.topLeft, rotation: rotation).first, [0, 0], "\(rotation.label)")
+            XCTAssertEqual(firstTwo(.topRight, rotation: rotation).first, [width - 1, 0], "\(rotation.label)")
+            XCTAssertEqual(firstTwo(.bottomLeft, rotation: rotation).first, [0, height - 1], "\(rotation.label)")
+            XCTAssertEqual(firstTwo(.bottomRight, rotation: rotation).first, [width - 1, height - 1], "\(rotation.label)")
+        }
+    }
+
+    /// And rows are the rows on screen: from the top left, pixel 2 is to
+    /// the right of pixel 1 whichever way the fixture is turned.
+    func testRowsRunAlongTheRowsOnScreen() {
+        for rotation in DisguisePixelMap.Rotation.allCases {
+            XCTAssertEqual(firstTwo(.topLeft, rotation: rotation), [[0, 0], [1, 0]], "\(rotation.label)")
+            XCTAssertEqual(firstTwo(.topLeft, order: .columns, rotation: rotation), [[0, 0], [0, 1]],
+                           "\(rotation.label)")
+        }
     }
 }

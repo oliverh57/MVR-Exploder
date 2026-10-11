@@ -10,7 +10,12 @@ import AppKit
 
 @main
 struct MVR_ExploderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @AppStorage("appearanceMode") private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+
+    /// The one file the app works on. Held here rather than by the window,
+    /// so closing the window doesn't take an edited file with it.
+    @StateObject private var document = MVRDocument()
 
     private var appearanceMode: AppearanceMode {
         AppearanceMode(rawValue: appearanceModeRaw) ?? .system
@@ -18,8 +23,11 @@ struct MVR_ExploderApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .onAppear { applyAppearance() }
+            ContentView(document: document)
+                .onAppear {
+                    applyAppearance()
+                    appDelegate.document = document
+                }
                 .onChange(of: appearanceModeRaw) { _, _ in applyAppearance() }
         }
         .commands {
@@ -45,5 +53,32 @@ struct MVR_ExploderApp: App {
         case .light: NSApp.appearance = NSAppearance(named: .aqua)
         case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
         }
+    }
+}
+
+/// Asks before quitting throws away edits that were never exported.
+///
+/// Edits reach the document when a tool's Apply is pressed; leaving a tool
+/// any other way asks there. Quitting is one of the two ways applied edits
+/// can still be lost; closing the file from the tools page is the other.
+/// A tool's unapplied work isn't covered here.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var document: MVRDocument?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let document, document.isLoaded, document.hasUnexportedChanges else {
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Quit without exporting \(document.fileName)?"
+        alert.informativeText = "Your changes haven't been exported."
+        alert.addButton(withTitle: "Cancel")
+        let quit = alert.addButton(withTitle: "Quit Without Exporting")
+        quit.hasDestructiveAction = true
+
+        return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
     }
 }

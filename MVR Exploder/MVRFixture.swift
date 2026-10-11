@@ -39,8 +39,8 @@ struct MVRFixture: Identifiable {
 
     /// Live DOM nodes backing this fixture, so edits can be written back
     /// into the document before export.
-    let xmlElement: XMLElement          // the <Fixture> element (uuid attribute, FixtureID)
-    let addressElement: XMLElement?     // the first <Address> element, if any
+    var xmlElement: XMLElement          // the <Fixture> element (uuid attribute, FixtureID)
+    var addressElement: XMLElement?     // the first <Address> element, if any
 
     var isFixtureIDEdited: Bool {
         currentFixtureID != originalFixtureID
@@ -164,6 +164,29 @@ enum MVRFixtureField: String, CaseIterable, Identifiable {
         case .universe: return "Universe"
         case .channel: return "Channel"
         case .mode: return "Mode"
+        }
+    }
+
+    /// What's wrong with a value typed into this field, or nil if it's
+    /// fine. Shared by the table and the fixture popover, so the two can't
+    /// disagree about what's allowed.
+    func validate(_ value: String) -> String? {
+        switch self {
+        case .name, .mode:
+            return value.isEmpty ? "Cannot be empty." : nil
+        case .uuid:
+            return value.isEmpty ? "Cannot be empty." : nil
+        case .fixtureID:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return number < 0 ? "Cannot be negative." : nil
+        case .universe:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return number < 1 ? "Universe starts at 1." : nil
+        case .channel:
+            guard let number = Int(value) else { return "Must be a whole number." }
+            return (1...512).contains(number) ? nil : "Channel must be between 1 and 512."
+        case .layer:
+            return nil
         }
     }
 }

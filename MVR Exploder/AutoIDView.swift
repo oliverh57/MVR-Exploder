@@ -103,8 +103,7 @@ struct AutoIDView: View {
             Button("Discard", role: .destructive) { onCancel() }
             Button("Keep Working", role: .cancel) {}
         } message: {
-            Text("The groups, orders, names and starting IDs you've set here "
-                 + "will be lost. Nothing has been written to the file yet.")
+            Text("Your changes to this run will be lost.")
         }
         .onAppear {
             if selectedSpecs.isEmpty, let first = session.displayTypes.first { selectedSpecs = [first] }
@@ -144,11 +143,9 @@ struct AutoIDView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 16) {
-            Text("Smart Auto ID")
-                .font(.headline)
-
-            Divider().frame(height: 20)
+        // The way out goes the same way as Cancel, so a run with work in
+        // it still asks first.
+        ToolHeader("Smart Auto ID", onBack: requestCancel) {
 
             HStack(spacing: 6) {
                 Text("Start at")
@@ -171,7 +168,7 @@ struct AutoIDView: View {
             }
             .disabled(!session.canUndo)
             .keyboardShortcut("z", modifiers: .command)
-            .help("Step back through merges, splits and settings.")
+            .help("Undo the last change.")
 
             Button {
                 session.redo()
@@ -188,9 +185,14 @@ struct AutoIDView: View {
             Text("\(session.plan.changedCount) of \(session.plan.assignments.count) IDs change")
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 6)
+        // Cancel and Apply sit in the header, as in every tool that edits.
+        // Escape and Return stay theirs here: Escape is how a rename or a
+        // split backs out, which `requestCancel` handles first.
+        .environment(\.toolEditActions, ToolEditActions(
+            canApply: session.plan.changedCount > 0,
+            cancel: requestCancel,
+            apply: onApply,
+            usesKeys: true))
     }
 
     /// Spare IDs left in the numbering, so a fixture added later can be
@@ -205,14 +207,12 @@ struct AutoIDView: View {
                 title: "Gap between groups",
                 isOn: $session.gaps.betweenGroups,
                 value: $session.gaps.groupGap,
-                help: "Leave this many spare IDs after each group, so a "
-                    + "fixture added to a truss later doesn't push the rest along.")
+                help: "Spare IDs after each group, for fixtures added later.")
             gapControl(
                 title: "Gap between fixtures",
                 isOn: $session.gaps.betweenFixtures,
                 value: $session.gaps.fixtureGap,
-                help: "Leave this many spare IDs after each fixture — a gap of 1 "
-                    + "numbers 1001, 1003, 1005, leaving room to slot one in between.")
+                help: "Spare IDs after each fixture. A gap of 1 gives 1001, 1003, 1005.")
         }
     }
 
@@ -239,13 +239,11 @@ struct AutoIDView: View {
         HStack(spacing: 8) {
             if session.restoredFromFile {
                 Image(systemName: "clock.arrow.circlepath")
-                Text("Picked up where you left off — this file carries an earlier run. "
-                     + "Groups, orders and names are as you left them.")
+                Text("Restored your last run from this file.")
                 Button("Start fresh") { session.startFresh() }
                     .buttonStyle(.link)
             } else {
-                Text("Fixtures are grouped into positions — trusses, towers, floor packages — "
-                     + "and numbered along each in turn. Every fixture type gets its own block of IDs.")
+                Text("Fixtures are grouped by truss and numbered along each one. Each type gets its own block of IDs.")
             }
             Spacer()
         }
@@ -279,8 +277,7 @@ struct AutoIDView: View {
                     .foregroundStyle(.orange)
             }
             .buttonStyle(.plain)
-            .help("\(targets.count) group\(targets.count == 1 ? "" : "s") with a shape that has "
-                  + "no obvious order. Click to list them.")
+            .help("\(targets.count) group\(targets.count == 1 ? " needs" : "s need") an order. Click to see.")
             .popover(isPresented: $showAttentionList, arrowEdge: .bottom) {
                 attentionList(targets)
             }
@@ -308,8 +305,7 @@ struct AutoIDView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Groups with no obvious numbering order")
                 .font(.caption.weight(.medium))
-            Text("The shape doesn't say which way the numbers should run. "
-                 + "Open one and pick an order, or accept the suggested one.")
+            Text("Pick an order for each, or keep the suggested one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -501,7 +497,7 @@ struct AutoIDView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Grouping distance — how far apart fixtures must be to be a separate truss")
+                Text("Grouping distance — the gap that starts a new truss")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -516,7 +512,7 @@ struct AutoIDView: View {
 
             HStack(spacing: 8) {
                 Slider(value: position, in: 0...1)
-                    .help("Left splits the type into more, smaller groups; right merges them into fewer, larger ones.\n\nSetting this by hand also turns off the automatic truss detection for this type, since the two would fight. Use Auto to get it back.")
+                    .help("Left for more, smaller groups; right for fewer, larger ones. Setting this turns off automatic truss detection — Auto turns it back on.")
 
                 // The count is the answer to what the drag was for, so it
                 // sits under the thumb rather than only in the list below.
@@ -563,7 +559,7 @@ struct AutoIDView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Ordering tolerance — how close fixtures must be to count as one position when numbering")
+                Text("Ordering tolerance — how close counts as the same position")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -640,7 +636,7 @@ struct AutoIDView: View {
 
     private var typeList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Fixture types — drag to reorder, untick to leave alone")
+            Text("Fixture types — drag to reorder, untick to skip")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
@@ -702,7 +698,7 @@ struct AutoIDView: View {
                 Divider()
                 Button("Group fixtures together") {}
                     .disabled(true)
-                    .help("Select the groups in the middle column, then right-click one of them.")
+                    .help("Select groups in the middle column, then right-click.")
     }
 
     private func typeRow(_ spec: String) -> some View {
@@ -737,7 +733,7 @@ struct AutoIDView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
-                        .help("Numbered as one type. Click to see which, or to take one out.")
+                        .help("Numbered as one type. Click to change.")
                         .popover(
                             isPresented: Binding(
                                 get: { linkedTypesRow == spec },
@@ -759,7 +755,7 @@ struct AutoIDView: View {
                         Text("\(summary.groupCount) groups")
                         if session.hasManualGrouping(for: spec) {
                             Image(systemName: "hand.raised.fill")
-                                .help("This type's grouping has been adjusted by hand.")
+                                .help("Grouping edited by hand.")
                         }
                     }
                     .font(.caption)
@@ -777,8 +773,7 @@ struct AutoIDView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
-                    .help("\(session.groupsNeedingAttention(in: spec)) group(s) here have a shape "
-                          + "with no obvious order. Open the type and pick one.")
+                    .help("\(session.groupsNeedingAttention(in: spec)) group(s) need an order.")
             }
 
             Menu {
@@ -948,7 +943,7 @@ struct AutoIDView: View {
                         Label(selectedGroups.count == 1 ? "Play group" : "Play order", systemImage: "play.fill")
                     }
                     .disabled(previewOverlays.isEmpty)
-                    .help("Flash each fixture in turn, in the order it would be numbered.")
+                    .help("Play the numbering order.")
                 }
             }
             .padding(.horizontal, 12)
@@ -1069,10 +1064,10 @@ struct AutoIDView: View {
 
     private var previewCaption: String {
         if previewMode == .idMap {
-            return "Every ID the run would leave behind, gaps included. Click a cell to jump to its group."
+            return "The IDs this run gives out. Click a cell to find its group."
         }
         if isDrawingSplit {
-            return "Drag a line across the group where it should be cut in two."
+            return "Drag a line across the group to split it."
         }
         guard let selectedSpec, session.includedTypes.contains(selectedSpec) else {
             return "Select a fixture type to preview its grouping."
@@ -1081,17 +1076,13 @@ struct AutoIDView: View {
         // line of everything: the useful sentence when a group is in hand
         // is how to add a second, and when several are how to merge them.
         if selectedGroups.count > 1 {
-            return "\(selectedGroups.count) groups selected — right-click to merge them into one. "
-                + "Control-click or Control-drag to add more, Control-click a selected box to drop it."
+            return "\(selectedGroups.count) groups selected — right-click to merge. Control-click to add or remove."
         }
         if selectedGroups.count == 1, let index = selectedGroups.first {
             return session.name(forGroup: index, in: selectedSpec)
-                + " — the line runs in ID order from the dot. "
-                + "Control-click or Control-drag another box to select several and merge them."
+                + " — numbers run from the dot. Control-click to select more."
         }
-        return "Each box is one group; the line and arrows run in ID order. "
-            + "Click one to select it, Control-click or Control-drag to pick several. "
-            + "Drag to orbit, Shift-drag to pan."
+        return "Each box is a group; arrows show the ID order. Click to select, Control-click for more. Drag to orbit, Shift-drag to pan."
     }
 
     @ViewBuilder
@@ -1107,7 +1098,7 @@ struct AutoIDView: View {
                         Image(systemName: "hand.raised.fill")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .help("This type's group order has been set by hand.")
+                            .help("Group order set by hand.")
                     }
                 }
                 .padding(.horizontal, 12)
@@ -1197,7 +1188,7 @@ struct AutoIDView: View {
             Button("Set") { applyPin() }
             Button("Cancel", role: .cancel) { pinTarget = nil }
         } message: {
-            Text("Numbering starts here. Other types move out of the way; leave it empty to go back to automatic.")
+            Text("Numbering starts here. Leave it empty for automatic.")
         }
         .alert("That clashes with existing IDs", isPresented: Binding(
             get: { pinClash != nil },
@@ -1209,7 +1200,7 @@ struct AutoIDView: View {
             }
             Button("Keep it anyway") { pinClash = nil }
         } message: {
-            Text("\(pinClash?.count ?? 0) fixtures would share an ID with another. The run can't move those out of the way — they're either pinned too, or kept by a type you've left out.")
+            Text("\(pinClash?.count ?? 0) fixtures would share an ID with a pinned or skipped type.")
         }
             }
         } else {
@@ -1217,7 +1208,7 @@ struct AutoIDView: View {
                 selectedSpec == nil ? "Select a fixture type" : "Not being renumbered",
                 systemImage: "square.stack.3d.up.slash",
                 description: Text(selectedSpec == nil
-                                  ? "Pick a type on the left to see the trusses found for it."
+                                  ? "Pick a type on the left."
                                   : "Tick this type to include it in the run."))
         }
     }
@@ -1278,7 +1269,7 @@ struct AutoIDView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption2)
                             .foregroundStyle(.orange)
-                            .help("This group's shape has no obvious order. Select it to see the route chosen, or pick a different one.")
+                            .help("No obvious order for this group. Select it to check or change it.")
                     }
                     if renamingGroup != index, session.hasCustomName(forGroup: index, in: spec) {
                         Image(systemName: "pencil")
@@ -1561,7 +1552,7 @@ struct AutoIDView: View {
                     .foregroundStyle(.orange)
             }
             .buttonStyle(.plain)
-            .help("These fixtures bend away from a straight line, so left-to-right is only a guess. Click to choose an order.")
+            .help("Not a straight line, so the order is a guess. Click to choose.")
             .popover(
                 isPresented: Binding(
                     get: { warningMenuGroup == index },
@@ -1601,10 +1592,10 @@ struct AutoIDView: View {
         HStack(spacing: 12) {
             if !session.plan.collisions.isEmpty {
                 Label(
-                    "\(session.plan.collisions.count) IDs clash with types you've excluded",
+                    "\(session.plan.collisions.count) IDs clash with skipped types",
                     systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                    .help("Excluded types keep their existing IDs. Move the starting ID clear of them, or include those types too.")
+                    .help("Skipped types keep their IDs. Change the starting ID or include them.")
             }
 
             Spacer()
@@ -1620,11 +1611,6 @@ struct AutoIDView: View {
                     .frame(width: 620, height: 420)
             }
 
-            Button("Cancel") { requestCancel() }
-                .keyboardShortcut(.cancelAction)
-            Button("Apply") { onApply() }
-                .keyboardShortcut(.defaultAction)
-                .disabled(session.plan.changedCount == 0)
         }
         .padding(12)
     }
