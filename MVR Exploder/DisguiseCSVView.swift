@@ -33,6 +33,11 @@ struct DisguiseCSVView: View {
 
     @State private var selectedSpec: String?
     @State private var selectedFixtureIDs: Set<String> = []
+    /// The order fixtures were ticked in, once every tick has been taken
+    /// off — clearing the lot and ticking along the screen is how you say
+    /// the order by hand. Nil until then, which is the file's own order.
+    /// Only the File ordering follows it.
+    @State private var tickOrder: [String]?
     /// The table's own row selection, which is not the tick: rows are
     /// selected to be acted on in bulk, ticked to go in the screen.
     @State private var rowSelection: Set<String> = []
@@ -40,6 +45,32 @@ struct DisguiseCSVView: View {
     /// out in — so what you see in the list is what comes out in the file.
     /// Empty is the file's own order for the type, which is the default.
     @State private var sortOrder: [KeyPathComparator<MVRFixture>] = []
+    /// The order underneath any column sort. Clicking a column overrides
+    /// it; picking one again clears the column sort.
+    @State private var ordering = Ordering.file
+    /// Each fixture's place in the 3D order, worked out when that order is
+    /// picked rather than on every redraw — it clusters the whole type.
+    @State private var geometryRank: [String: Int] = [:]
+    /// The Auto ID path the 3D order follows. Nil is whichever Auto ID
+    /// would suggest for the type's shape, which is worked out alongside.
+    @State private var geometryStrategy: AutoIDOrderStrategy?
+    @State private var suggestedStrategy = AutoIDOrderStrategy.leftToRight
+
+    private enum Ordering: CaseIterable, Identifiable {
+        case file, fixtureID, geometry
+        var id: Self { self }
+        var label: String {
+            switch self {
+            case .file: return "File"
+            case .fixtureID: return "Fixture ID"
+            case .geometry: return "3D Position"
+            }
+        }
+    }
+    /// Runs that order backwards, for a screen patched from the other
+    /// end. Separate from the sort because the file's own order has no
+    /// column to click twice.
+    @State private var isReversed = false
     /// Bumped whenever the order or the ticks change, which recolours the
     /// preview.
     @State private var orderRevision = 0
@@ -288,10 +319,45 @@ struct DisguiseCSVView: View {
     private var fixturePicker: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Sort a column to change the order. Tick a selected row to tick them all.")
+                Text(followsTickOrder
+                     ? "Numbered in the order ticked. Untick everything to start again."
+                     : "Sort a column to change the order. Tick a selected row to tick them all.")
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                Text("Order by:")
+                // Nothing picked while a column sort is in charge, so it's
+                // plain which of the two the list is following.
+                Picker("", selection: Binding<Ordering?>(
+                    get: { sortOrder.isEmpty ? ordering : nil },
+                    set: { picked in
+                        guard let picked else { return }
+                        ordering = picked
+                        sortOrder = []
+                    })) {
+                    ForEach(Ordering.allCases) { Text($0.label).tag(Optional($0)) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("File keeps the MVR's own order; 3D Position follows the fixtures' shape.")
+
+                // The same paths Auto ID numbers a group along.
+                if ordering == .geometry && sortOrder.isEmpty {
+                    Picker("", selection: Binding(
+                        get: { geometryStrategy ?? suggestedStrategy },
+                        set: { geometryStrategy = $0 })) {
+                        ForEach(AutoIDOrderStrategy.allCases) { strategy in
+                            Text(strategy == suggestedStrategy
+                                 ? "\(strategy.label)  (suggested)" : strategy.label)
+                                .tag(strategy)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .help((geometryStrategy ?? suggestedStrategy).detail)
+                }
             }
             .font(.caption)
             .padding(12)
@@ -382,10 +448,24 @@ struct DisguiseCSVView: View {
         }
         .onChange(of: selectedFixtureIDs) { _, _ in orderRevision += 1; schedulePlay() }
         .onChange(of: sortOrder) { _, _ in orderRevision += 1; schedulePlay() }
+        .onChange(of: isReversed) { _, _ in orderRevision += 1; schedulePlay() }
+        .onChange(of: ordering) { _, _ in
+            refreshGeometryRank()
+            orderRevision += 1
+            schedulePlay()
+        }
+        .onChange(of: geometryStrategy) { _, _ in
+            refreshGeometryRank()
+            orderRevision += 1
+            schedulePlay()
+        }
         // Arriving at the step plays the order once, so the picture is
         // already answering "which way round does this go" before anyone
         // asks it.
-        .onAppear { schedulePlay() }
+        .onAppear {
+            refreshGeometryRank()
+            schedulePlay()
+        }
     }
 
     /// The handle between the table and the preview.
@@ -448,7 +528,10 @@ struct DisguiseCSVView: View {
                 revision: orderRevision,
                 playToken: playToken,
                 isSplitting: false,
-                onSplit: { _, _ in })
+                onSplit: { _, _ in },
+                // One group, so the box adds nothing but a wall in front
+                // of the fixtures and the path running through them.
+                drawsBoxes: false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
@@ -461,6 +544,15 @@ struct DisguiseCSVView: View {
                     .foregroundStyle(.secondary)
 
                 Spacer()
+
+                Toggle(isOn: $isReversed) {
+                    Label("Reverse", systemImage: "arrow.up.arrow.down")
+                }
+                .toggleStyle(.button)
+                .font(.caption)
+                .controlSize(.small)
+                .disabled(orderedSelectedIDs.count < 2)
+                .help("Swap the direction the fixtures run in the CSV.")
 
                 Button {
                     playToken += 1
@@ -479,27 +571,75 @@ struct DisguiseCSVView: View {
     /// Ticks or unticks a set of rows at once.
     private func setTicked(_ included: Bool, for ids: Set<String>) {
         if included {
+            // A run ticked in one go goes in as the list shows it.
+            let added = fixturesOfType.map(\.id)
+                .filter { ids.contains($0) && !selectedFixtureIDs.contains($0) }
             selectedFixtureIDs.formUnion(ids)
+            tickOrder?.append(contentsOf: added)
         } else {
             selectedFixtureIDs.subtract(ids)
+            tickOrder?.removeAll { ids.contains($0) }
+            if selectedFixtureIDs.isEmpty { tickOrder = [] }
         }
     }
 
     /// The fixtures of the chosen type, in the order they'll be laid out.
     ///
     /// Default is the order the file lists them in for this type, which is
-    /// what a patch normally follows; sorting a column re-orders them. The
-    /// list always reads in the order the screen is built.
+    /// what a patch normally follows; sorting a column re-orders them, and
+    /// Reverse runs it from the other end. The list always reads in the
+    /// order the screen is built.
     private var fixturesOfType: [MVRFixture] {
-        document.fixtures
-            .filter { $0.gdtfSpec == selectedSpec }
-            .sorted(using: sortOrder)
+        let ofType = document.fixtures.filter { $0.gdtfSpec == selectedSpec }
+        let base: [MVRFixture]
+        switch ordering {
+        case .file:
+            base = ofType
+        case .fixtureID:
+            base = ofType.sorted(using: KeyPathComparator(\.sortableFixtureID))
+        case .geometry:
+            // Unplaced fixtures keep their file order, after the rest.
+            base = ofType.enumerated().sorted {
+                (geometryRank[$0.element.id] ?? Int.max, $0.offset)
+                    < (geometryRank[$1.element.id] ?? Int.max, $1.offset)
+            }.map(\.element)
+        }
+        let sorted = sortOrder.isEmpty ? base : base.sorted(using: sortOrder)
+        return isReversed ? sorted.reversed() : sorted
     }
 
-    /// The ticked fixtures, in that same order — which is the order the
-    /// CSV is written in.
+    /// Works out the 3D order for the chosen type, along the path picked
+    /// — or, until one is, the one Auto ID would pick for its shape.
+    private func refreshGeometryRank() {
+        guard ordering == .geometry else { return }
+        let ofType = document.fixtures.filter { $0.gdtfSpec == selectedSpec }
+        suggestedStrategy = MVRAutoID.suggestedStrategy(fixtures: ofType, tolerance: .default)
+        let strategy = geometryStrategy ?? suggestedStrategy
+        let ids = MVRAutoID.orderedIDs(fixtures: ofType, strategy: strategy, tolerance: .default)
+        geometryRank = Dictionary(uniqueKeysWithValues: ids.enumerated().map { ($1, $0) })
+    }
+
+    /// Whether the ticked fixtures go in the order they were ticked
+    /// rather than the order the list shows.
+    private var followsTickOrder: Bool {
+        ordering == .file && sortOrder.isEmpty && tickOrder != nil
+    }
+
+    /// The ticked fixtures, in the order the CSV is written in: the list's
+    /// order, or the order they were ticked in. The rows themselves stay
+    /// put either way — a row jumping as its box is clicked would put the
+    /// next box somewhere else — so `#` is what shows the tick order.
+    private var tickedInOrder: [MVRFixture] {
+        let ticked = fixturesOfType.filter { selectedFixtureIDs.contains($0.id) }
+        guard followsTickOrder, let tickOrder else { return ticked }
+        var rank: [String: Int] = [:]
+        for (index, id) in tickOrder.enumerated() { rank[id] = index }
+        let sorted = ticked.sorted { (rank[$0.id] ?? .max) < (rank[$1.id] ?? .max) }
+        return isReversed ? sorted.reversed() : sorted
+    }
+
     private var orderedSelectedIDs: [String] {
-        fixturesOfType.filter { selectedFixtureIDs.contains($0.id) }.map(\.id)
+        tickedInOrder.map(\.id)
     }
 
     /// Each ticked fixture's place on the screen, 1 first.
@@ -529,12 +669,12 @@ struct DisguiseCSVView: View {
             HStack(spacing: 16) {
                 sizeField("Across", value: Binding(
                     get: { block.columns },
-                    set: { block.resize(columns: $0, rows: block.rows); fill = nil }),
+                    set: { block.resize(columns: $0, rows: block.rows); layoutChanged() }),
                     range: 1...256)
 
                 sizeField("High", value: Binding(
                     get: { block.rows },
-                    set: { block.resize(columns: block.columns, rows: $0); fill = nil }),
+                    set: { block.resize(columns: block.columns, rows: $0); layoutChanged() }),
                     range: 1...64)
 
                 Divider().frame(height: 18)
@@ -547,14 +687,14 @@ struct DisguiseCSVView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 200)
-                .onChange(of: rotation) { _, _ in fill = nil }
+                .onChange(of: rotation) { _, _ in layoutChanged() }
                 .help("Rotate the fixture — 90° stands a line up as a tower.")
 
                 Text("Pixel Direction:")
                     .fixedSize()
                 Picker("", selection: Binding(
                     get: { block.order },
-                    set: { block.order = $0; fill = nil })) {
+                    set: { block.order = $0; layoutChanged() })) {
                     ForEach(DisguisePixelMap.PixelOrder.allCases) { order in
                         Label(order.label, systemImage: order.symbol).tag(order)
                     }
@@ -566,7 +706,7 @@ struct DisguiseCSVView: View {
                     .fixedSize()
                 Picker("", selection: Binding(
                     get: { block.start },
-                    set: { block.start = $0; fill = nil })) {
+                    set: { block.start = $0; layoutChanged() })) {
                     ForEach(DisguisePixelMap.PixelStart.allCases) { Text($0.label).tag($0) }
                 }
                 .frame(width: 130)
@@ -754,14 +894,14 @@ struct DisguiseCSVView: View {
                         .gridColumnAlignment(.trailing)
                     numberStepper(Binding(
                         get: { block.columns },
-                        set: { block.resize(columns: $0, rows: block.rows); fill = nil }),
+                        set: { block.resize(columns: $0, rows: block.rows); layoutChanged() }),
                         range: 1...256)
                 }
                 GridRow {
                     Text("Pixels high")
                     numberStepper(Binding(
                         get: { block.rows },
-                        set: { block.resize(columns: block.columns, rows: $0); fill = nil }),
+                        set: { block.resize(columns: block.columns, rows: $0); layoutChanged() }),
                         range: 1...64)
                 }
             }
@@ -1161,15 +1301,21 @@ struct DisguiseCSVView: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(Color.accentColor)
                 .fixedSize()
+                // Opaque, like the block: the drawn grid's own grey copy of
+                // this caption is underneath, a point or so out, and the
+                // two together read as one blurred label.
+                .padding(.horizontal, 4)
+                .padding(.vertical, 3)
+                .background(Color(nsColor: .windowBackgroundColor))
                 // Beside a stack, under a row — the same places the drawn
-                // fixtures put theirs.
+                // fixtures put theirs, less the padding.
                 .offset(
                     x: rotation.isUpright
-                        ? CGFloat(size.width) * Self.pitchX - Self.cellGap + 8
-                        : 2,
+                        ? CGFloat(size.width) * Self.pitchX - Self.cellGap + 4
+                        : -2,
                     y: rotation.isUpright
-                        ? 2
-                        : CGFloat(size.height) * Self.pitchY - Self.cellGap + 3)
+                        ? -1
+                        : CGFloat(size.height) * Self.pitchY - Self.cellGap)
         }
     }
 
@@ -1360,6 +1506,18 @@ struct DisguiseCSVView: View {
             anchor: fill.anchor, value: fill.value, step: fill.step, rotation: rotation)
     }
 
+    /// The size, rotation or pixel order has changed under an open card.
+    ///
+    /// The card goes too: its pixel is an index into the old layout, so it
+    /// now names a different pixel — and a card left open over a resize
+    /// could end up not drawn at all, which still switched off hovering
+    /// and clicking on the grid with nothing on screen to close.
+    private func layoutChanged() {
+        fill = nil
+        selectedCell = nil
+        offsetText = ""
+    }
+
     /// Back to an empty layout of the same size.
     private func clearLayout() {
         block = DisguisePixelMap.Block(columns: block.columns, rows: block.rows)
@@ -1387,7 +1545,7 @@ struct DisguiseCSVView: View {
     /// are the ones that become the screen, one for one with
     /// `placements`, so a block on the grid can say which fixture it is.
     private var laidOutFixtures: [MVRFixture] {
-        fixturesOfType.filter { selectedFixtureIDs.contains($0.id) && $0.currentAddress != nil }
+        tickedInOrder.filter { $0.currentAddress != nil }
     }
 
     private var placements: [DisguisePixelMap.Placement] {
@@ -1431,7 +1589,10 @@ struct DisguiseCSVView: View {
         guard let next = Step(rawValue: step.rawValue + 1) else { return }
         if step == .type {
             selectedFixtureIDs = Set(fixturesOfType.map(\.id))
+            tickOrder = nil
             rowSelection = []
+            // A path picked for the last type's shape needn't suit this one.
+            geometryStrategy = nil
         }
         step = next
         if next == .pixels { showsPixelSetup = true }

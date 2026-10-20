@@ -24,7 +24,11 @@ enum AutoIDOverlayBuilder {
     /// the outermost fixture and disappear into it.
     private static let boxPadding: CGFloat = 0.25
 
-    static func node(groups: [AutoIDGroupOverlay], positions: [String: SCNVector3]) -> SCNNode {
+    /// `boxes` off leaves just the path, arrows and label — for a single
+    /// group, where the box only hides the order it's there to show.
+    static func node(
+        groups: [AutoIDGroupOverlay], positions: [String: SCNVector3], boxes: Bool = true
+    ) -> SCNNode {
         let root = SCNNode()
         root.name = "autoIDOverlay"
 
@@ -33,16 +37,18 @@ enum AutoIDOverlayBuilder {
             guard !points.isEmpty else { continue }
 
             let container = SCNNode()
-            container.addChildNode(boxNode(around: points, color: group.color))
+            if boxes {
+                container.addChildNode(boxNode(around: points, color: group.color))
 
-            // A filled version of the same box, kept hidden until the
-            // cursor is over the group. The wireframe alone is hard to
-            // pick out among a dozen others; a solid face says which one
-            // you are actually pointing at.
-            let solid = solidNode(around: points, color: group.color)
-            solid.name = Self.solidNodeName
-            solid.isHidden = true
-            container.addChildNode(solid)
+                // A filled version of the same box, kept hidden until the
+                // cursor is over the group. The wireframe alone is hard to
+                // pick out among a dozen others; a solid face says which one
+                // you are actually pointing at.
+                let solid = solidNode(around: points, color: group.color)
+                solid.name = Self.solidNodeName
+                solid.isHidden = true
+                container.addChildNode(solid)
+            }
 
             if points.count > 1 {
                 container.addChildNode(pathNode(through: points, color: group.color))

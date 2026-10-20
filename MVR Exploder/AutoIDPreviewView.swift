@@ -33,6 +33,9 @@ struct AutoIDPreviewView: NSViewRepresentable {
     let isSplitting: Bool
     /// The two halves a drawn cut divides the focused group into.
     let onSplit: (Set<String>, Set<String>) -> Void
+    /// Whether each group gets a box around it. Off where there is only
+    /// one group and the box is just in the way of its fixtures.
+    var drawsBoxes = true
     /// The fixture under the cursor and where to put its card, in view
     /// coordinates. Reported up rather than drawn here: the card is a
     /// SwiftUI view laid over the representable, same as in the 3D viewer.
@@ -103,6 +106,7 @@ struct AutoIDPreviewView: NSViewRepresentable {
         context.coordinator.onPickFixture = onPickFixture
         context.coordinator.onRequestMenu = onRequestMenu
         context.coordinator.onMarqueeGroups = onMarqueeGroups
+        context.coordinator.drawsBoxes = drawsBoxes
         context.coordinator.setSelected(selectedGroups)
         context.coordinator.update(
             focusedSpec: focusedSpec,
@@ -173,6 +177,7 @@ struct AutoIDPreviewView: NSViewRepresentable {
                     && a.camera.x == b.camera.x && a.camera.y == b.camera.y && a.camera.z == b.camera.z
             }
         }
+        var drawsBoxes = true
         private var selectedFills: Set<Int> = []
         private var hoveredFill: Int?
         /// Set when the selection came from clicking in this view.
@@ -301,7 +306,8 @@ struct AutoIDPreviewView: NSViewRepresentable {
 
             overlayNode.removeFromParentNode()
             hoveredFill = nil
-            overlayNode = AutoIDOverlayBuilder.node(groups: overlays, positions: positionsByFixture)
+            overlayNode = AutoIDOverlayBuilder.node(
+                groups: overlays, positions: positionsByFixture, boxes: drawsBoxes)
             scene.rootNode.addChildNode(overlayNode)
             // The boxes are new nodes, so the fills have to be put back.
             refreshFills()
