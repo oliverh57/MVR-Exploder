@@ -1,4 +1,5 @@
 import XCTest
+import ZIPFoundation
 @testable import MVR_Exploder
 
 /// Exporting must never lose a fixture. It once lost every one of them.
@@ -38,6 +39,29 @@ final class ExportIntegrityTests: XCTestCase {
         }
     }
 
+    /// The other way round: the last object in a layer was kept as if it
+    /// were a container, because `.//Fixture` on it ran on past its own
+    /// subtree into the fixtures in later layers. One stray object per
+    /// layer reached Vectorworks.
+    func testVenueObjectsLastInALayerAreStripped() throws {
+        let url = try MVRTestRig.write(
+            MVRTestRig.bar("Spot", count: 3, y: 0),
+            sceneObjects: [
+                MVRTestRig.SceneObject(name: "Truss", fixtures: MVRTestRig.bar("Wash", count: 2, y: 3000)),
+            ],
+            venueObjects: [
+                MVRTestRig.SceneObject(name: "Barrier"),
+                MVRTestRig.SceneObject(name: "Stage"),
+            ])
+        let document = MVRDocument()
+        try document.load(from: url, idFieldName: "FixtureID")
+
+        let exported = try export(document, includeSceneGeometry: false)
+        let names = try sceneXML(of: exported)
+            .nodes(forXPath: "//SceneObject/@name").compactMap(\.stringValue)
+        XCTAssertEqual(names, ["Truss"], "only the container holding fixtures should be left")
+    }
+
     func testEveryExportOptionKeepsEveryFixture() throws {
         let url = try MVRTestRig.write(
             MVRTestRig.bar("Spot", count: 4, y: 0),
@@ -72,5 +96,13 @@ final class ExportIntegrityTests: XCTestCase {
             replaceAllWithDummyGDTFs: false,
             cleanupEmptyClassesAndLayers: cleanup))
         return url
+    }
+
+    private func sceneXML(of url: URL) throws -> XMLDocument {
+        let archive = try Archive(url: url, accessMode: .read)
+        let entry = try XCTUnwrap(archive["GeneralSceneDescription.xml"])
+        var data = Data()
+        _ = try archive.extract(entry) { data.append($0) }
+        return try XMLDocument(data: data)
     }
 }

@@ -63,11 +63,13 @@ enum MVRTestRig {
         layer: String = "Lighting",
         layerUUID: String = "11111111-2222-3333-4444-555555555555",
         sceneObjects: [SceneObject] = [],
+        venueObjects: [SceneObject] = [],
         file: StaticString = #filePath, line: UInt = #line
     ) throws -> URL {
         let url = temporaryDirectory().appendingPathComponent("\(UUID().uuidString).mvr")
         let xml = sceneDescription(
-            fixtures: fixtures, layer: layer, layerUUID: layerUUID, sceneObjects: sceneObjects)
+            fixtures: fixtures, layer: layer, layerUUID: layerUUID, sceneObjects: sceneObjects,
+            venueObjects: venueObjects)
 
         let workDir = temporaryDirectory().appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
@@ -92,18 +94,29 @@ enum MVRTestRig {
     // MARK: - XML
 
     private static func sceneDescription(
-        fixtures: [Fixture], layer: String, layerUUID: String, sceneObjects: [SceneObject]
+        fixtures: [Fixture], layer: String, layerUUID: String, sceneObjects: [SceneObject],
+        venueObjects: [SceneObject]
     ) -> String {
         var children = fixtures.map(fixtureXML).joined(separator: "\n")
         for object in sceneObjects {
             children += "\n" + sceneObjectXML(object)
         }
+        // A layer of its own, written *before* the fixtures' layer, as venue
+        // layers are in real files.
+        let venueLayer = venueObjects.isEmpty ? "" : """
+              <Layer name="Venue" uuid="\(UUID().uuidString)">
+                <ChildList>
+        \(venueObjects.map(sceneObjectXML).joined(separator: "\n"))
+                </ChildList>
+              </Layer>
+        """
 
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <GeneralSceneDescription verMajor="1" verMinor="5">
           <Scene>
             <Layers>
+        \(venueLayer)
               <Layer name="\(escaped(layer))" uuid="\(layerUUID)">
                 <ChildList>
         \(children)

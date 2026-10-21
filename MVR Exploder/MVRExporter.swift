@@ -491,13 +491,24 @@ enum MVRExporter {
             // container is kept and only the geometry it carries itself is
             // dropped. Nested objects deeper down are separate entries in
             // this same list and get the same treatment.
-            guard ((try? element.nodes(forXPath: ".//Fixture")) ?? []).isEmpty else {
+            guard !containsFixture(element) else {
                 for geometries in element.elements(forName: "Geometries") {
                     geometries.detach()
                 }
                 continue
             }
             element.detach()
+        }
+    }
+
+    /// Walks the element's own subtree by hand. Foundation's XPath can't be
+    /// trusted for this: `.//Fixture` on the last child of a `<ChildList>`
+    /// returned every fixture in the document, so one venue object per
+    /// layer was mistaken for a container and survived geometry stripping.
+    private static func containsFixture(_ element: XMLElement) -> Bool {
+        (element.children ?? []).contains { child in
+            guard let child = child as? XMLElement else { return false }
+            return child.name == "Fixture" || containsFixture(child)
         }
     }
 
