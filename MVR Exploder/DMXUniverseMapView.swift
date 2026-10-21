@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The Fixture ID map's counterpart for the patch: every DMX universe in
 /// use, channel by channel, with each fixture filling as many channels as
@@ -308,21 +309,9 @@ struct DMXUniverseMap: View {
                     pick(group, at: address)
                 }
             }
-            .dropDestination(for: String.self) { items, session in
-                dropTarget = nil
-                guard let item = items.first, let source = Int(item),
-                      let target = layout.address(at: session.location) else { return }
-                _ = move(from: source, to: target)
-            }
-            .onDropSessionUpdated { session in
-                switch session.phase {
-                case .entering, .active:
-                    let address = layout.address(at: session.location)
-                    if dropTarget != address { dropTarget = address }
-                default:
-                    dropTarget = nil
-                }
-            }
+            .onDrop(of: [.plainText], delegate: ChannelDrop(
+                layout: layout, target: $dropTarget,
+                move: { _ = move(from: $0, to: $1) }))
             // From the left, not centred: in line with the strip above,
             // whether or not a scroll bar is taking up room on the right.
             .padding(12)
@@ -889,6 +878,36 @@ private struct HoverHandle: View {
                 // tooltip rather than keeping the last one's.
                 .id(run.start)
         }
+    }
+}
+
+/// A fixture dropped on the map, and the channel a drag is over on the way.
+/// A DropDelegate rather than dropDestination's drop session, which needs
+/// macOS 26: this reports where the drag is on macOS 15 too.
+private struct ChannelDrop: DropDelegate {
+    let layout: DMXMapLayout
+    @Binding var target: Int?
+    let move: (Int, Int) -> Void
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let address = layout.address(at: info.location)
+        if target != address { target = address }
+        return nil
+    }
+
+    func dropExited(info: DropInfo) {
+        target = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        target = nil
+        guard let destination = layout.address(at: info.location),
+              let provider = info.itemProviders(for: [.plainText]).first else { return false }
+        _ = provider.loadTransferable(type: String.self) { result in
+            guard let source = (try? result.get()).flatMap({ Int($0) }) else { return }
+            DispatchQueue.main.async { move(source, destination) }
+        }
+        return true
     }
 }
 
