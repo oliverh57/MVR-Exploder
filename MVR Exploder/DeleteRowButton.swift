@@ -1,8 +1,10 @@
 import SwiftUI
 
 /// A delete "✕" that's grey at rest and turns red on hover, so it doesn't
-/// visually shout at you from every row. Shared by Single Edit and Compare.
+/// visually shout at you from every row. Shared by Single Edit, Compare
+/// and the Geometry Inspector.
 struct DeleteRowButton: View {
+    var help = "Remove this fixture"
     let action: () -> Void
     @State private var isHovering = false
 
@@ -15,6 +17,6 @@ struct DeleteRowButton: View {
         .onHover { hovering in
             isHovering = hovering
         }
-        .help("Remove this fixture")
+        .help(help)
     }
 }

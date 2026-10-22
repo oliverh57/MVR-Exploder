@@ -1010,12 +1010,14 @@ struct Fixture3DView: View {
     /// files reach several thousand objects and meshes, which would stall
     /// the UI for seconds if built during init like the fixture markers.
     private func loadSceneGeometryIfNeeded() async {
-        guard !hasAttemptedGeometryLoad, let mvrURL else { return }
+        // The geometry as the document has it, edits included — read here
+        // rather than in init, since an edited scene is serialised for it.
+        guard !hasAttemptedGeometryLoad, let geometrySource = document.geometrySource else { return }
         hasAttemptedGeometryLoad = true
         isLoadingGeometry = true
 
         let loaded = await Task.detached(priority: .userInitiated) {
-            MVRSceneGeometryLoader.buildGeometryNode(mvrURL: mvrURL)
+            MVRSceneGeometryLoader.buildGeometryNode(source: geometrySource)
         }.value
 
         isLoadingGeometry = false

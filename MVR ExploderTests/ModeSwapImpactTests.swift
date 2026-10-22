@@ -1,7 +1,7 @@
 import XCTest
 @testable import MVR_Exploder
 
-/// What Mode Swap says a swap would do to the patch, before it's made.
+/// What the Mode Viewer says a mode change would do to the patch, before it's made.
 final class ModeSwapImpactTests: XCTestCase {
 
     override func tearDown() {
@@ -87,5 +87,12 @@ final class ModeSwapImpactTests: XCTestCase {
 
         XCTAssertFalse(result.isChecked)
         XCTAssertNil(result.channelChange)
+    }
+
+    func testFixtureIDsAreShownAsRuns() {
+        XCTAssertEqual(ModeViewerView.idRanges([103, 101, 102, 130]).full, "IDs 101–103, 130")
+        XCTAssertEqual(ModeViewerView.idRanges([1, 3, 5, 7]).short, "IDs 1, 3 +2 more")
+        XCTAssertEqual(ModeViewerView.idRanges([1, 3, 5, 7]).full, "IDs 1, 3, 5, 7")
+        XCTAssertEqual(ModeViewerView.idRanges([]).short, "No IDs")
     }
 }

@@ -39,8 +39,8 @@ struct ToolsView: View {
                         row("Compare & Merge", "Compare with another MVR and merge fixtures in.", "rectangle.split.2x1") {
                             onOpen(.compare)
                         }
-                        row("Mode Swap", "See each type's modes and swap them in bulk.", "arrow.left.arrow.right.square") {
-                            onOpen(.modeSwap)
+                        row("Geometry Inspector", "Edit set geometry and trusses. Simplify every mesh to make a heavy file lighter.", "cube") {
+                            onOpen(.geometryInspector)
                         }
                         // Patch Check is switched off until its findings
                         // can be trusted; the code is still in the project.
@@ -56,6 +56,9 @@ struct ToolsView: View {
                         }
                         row("DMX Universe Map", "See used channels, free space and overlaps.", "rectangle.split.3x3") {
                             onOpen(.dmxUniverseMap)
+                        }
+                        row("Mode Viewer", "See every fixture's mode at a glance, and change any of them.", "slider.horizontal.3") {
+                            onOpen(.modeViewer)
                         }
                     }
 
@@ -615,7 +618,7 @@ struct PatchPDFSheet: View {
     private func prepareStage() async {
         guard stage == nil, !isPreparing else { return }
         isPreparing = true
-        let geometry = await StageScene.loadGeometry(for: document.originalFileURL)
+        let geometry = await StageScene.loadGeometry(for: document.geometrySource)
         stage = StageScene(document: document, geometry: geometry)
         isPreparing = false
         preview = stage?.render(shot, size: Self.previewSize)

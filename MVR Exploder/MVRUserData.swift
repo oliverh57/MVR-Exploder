@@ -36,7 +36,8 @@ enum MVRUserData {
     /// wiping the Vectorworks entries on the way past would lose data the
     /// user never asked us to touch.
     static func write(
-        names: [String: String], session: AutoIDStoredSession?, in document: XMLDocument
+        names: [String: String], session: AutoIDStoredSession?,
+        gdtfSources: [String: GDTFSource] = [:], in document: XMLDocument
     ) {
         guard let root = document.rootElement() else { return }
 
@@ -46,7 +47,7 @@ enum MVRUserData {
             existing.detach()
         }
         let session = (session?.isEmpty ?? true) ? nil : session
-        guard !names.isEmpty || session != nil else { return }
+        guard !names.isEmpty || session != nil || !gdtfSources.isEmpty else { return }
 
         let data = XMLElement(name: "Data")
         data.addAttribute(XMLNode.attribute(withName: "provider", stringValue: provider) as! XMLNode)
@@ -59,6 +60,19 @@ enum MVRUserData {
             data.addChild(entry)
         }
 
+        for file in gdtfSources.keys.sorted() {
+            guard let source = gdtfSources[file] else { continue }
+            let entry = XMLElement(name: "GDTFSource")
+            for (name, value) in [
+                ("file", file), ("rid", String(source.rid)), ("manufacturer", source.manufacturer),
+                ("fixture", source.fixture), ("revision", source.revision), ("uploader", source.uploader),
+                ("modified", String(Int(source.modified.timeIntervalSince1970))),
+            ] {
+                entry.addAttribute(XMLNode.attribute(withName: name, stringValue: value) as! XMLNode)
+            }
+            data.addChild(entry)
+        }
+
         // Last, so the readable per-fixture entries come first when
         // anyone opens the file to look.
         if let session, let json = try? session.encoded() {
@@ -66,6 +80,40 @@ enum MVRUserData {
         }
 
         userDataElement(in: root, creating: true)?.addChild(data)
+    }
+
+    // MARK: - GDTF sources
+
+    /// Where a GDTF came from, when this app put it in the file: the GDTF
+    /// Share revision it was downloaded as. A GDTF's contents can't prove
+    /// where it came from, so this is what tells a genuine replacement
+    /// from the stand-in it replaced, after the file is saved and opened
+    /// again.
+    struct GDTFSource: Equatable, Sendable {
+        let rid: Int
+        let manufacturer: String
+        let fixture: String
+        let revision: String
+        /// "Manuf." for the manufacturer's own upload, "User" otherwise.
+        let uploader: String
+        let modified: Date
+
+        var isFromManufacturer: Bool { uploader.lowercased().hasPrefix("manuf") }
+    }
+
+    /// Keyed by the GDTF's file name, as fixtures' `<GDTFSpec>` names it.
+    static func gdtfSources(in document: XMLDocument) -> [String: GDTFSource] {
+        guard let data = dataElement(in: document, creating: false) else { return [:] }
+        var sources: [String: GDTFSource] = [:]
+        for entry in data.elements(forName: "GDTFSource") {
+            func value(_ name: String) -> String { entry.attribute(forName: name)?.stringValue ?? "" }
+            guard !value("file").isEmpty, let rid = Int(value("rid")) else { continue }
+            sources[value("file")] = GDTFSource(
+                rid: rid, manufacturer: value("manufacturer"), fixture: value("fixture"),
+                revision: value("revision"), uploader: value("uploader"),
+                modified: Date(timeIntervalSince1970: Double(value("modified")) ?? 0))
+        }
+        return sources
     }
 
     // MARK: - Session

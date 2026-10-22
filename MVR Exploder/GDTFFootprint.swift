@@ -21,6 +21,22 @@ struct GDTFFootprint: Equatable {
     /// address per break, and MVR lists one `<Address break="…">` for each.
     let channelsByBreak: [Int: Int]
 
+    /// What the mode costs a grandMA3 in parameters: one per attribute,
+    /// with a 16- or 24-bit channel's fine bytes free — MA's own rule, "you
+    /// do not pay extra for fixtures that are running 16-bit or 24-bit". So
+    /// it's the mode's DMX channels counted once each, every pixel of a
+    /// pixel fixture included. Virtual channels, which take no DMX, aren't
+    /// counted. Nil when not worked out.
+    var parameters: Int? = nil
+
+    /// The GDTF is a stand-in rather than the fixture's own: every channel
+    /// a separate byte with a made-up attribute. Exporters write these when
+    /// the real GDTF isn't attached — every real file checked carried
+    /// them, as "Dummy" or "Dimmer1…Dimmer73" channels. The footprint is
+    /// still right; which bytes are fine channels isn't known, so
+    /// `parameters` is only an upper bound.
+    var isPlaceholder = false
+
     /// The first break's count, which is what a single-address fixture
     /// occupies and what the patch check works from. Zero means the GDTF
     /// didn't say — see `isKnown`.
@@ -71,7 +87,7 @@ enum GDTFFootprintLoader {
 }
 
 extension MVRDocument {
-    /// Footprints for every type in the file, for Mode Swap and the DMX
+    /// Footprints for every type in the file, for the Mode Viewer and the DMX
     /// universe map.
     ///
     /// Off the main thread: a .gdtf is a zip full of meshes. GDTFs merged
@@ -118,11 +134,51 @@ enum GDTFFootprintParser {
     static func modes(description document: XMLDocument) -> [GDTFFootprint] {
         let nodes = (try? document.nodes(forXPath: "//DMXModes/DMXMode")) ?? []
         let geometries = Geometries(document)
+        let wholeFileIsStandIn = isStandIn(document)
         return nodes.compactMap { node in
             guard let mode = node as? XMLElement,
                   let name = mode.attribute(forName: "Name")?.stringValue else { return nil }
-            return GDTFFootprint(mode: name, channelsByBreak: channels(in: mode, geometries: geometries))
+            let read = channels(in: mode, geometries: geometries)
+            return GDTFFootprint(
+                mode: name, channelsByBreak: read.byBreak, parameters: read.parameters,
+                isPlaceholder: wholeFileIsStandIn || isPlaceholder(mode))
         }
+    }
+
+    /// Every channel a lone byte, most of them carrying a stand-in
+    /// attribute — "Dummy", "NoFeature" or a numbered "Dimmer12", none of
+    /// which a real GDTF fills a mode with.
+    private static func isPlaceholder(_ mode: XMLElement) -> Bool {
+        let channels = ((try? mode.nodes(forXPath: ".//DMXChannel")) ?? []).compactMap { $0 as? XMLElement }
+        guard !channels.isEmpty else { return false }
+        var standIns = 0
+        for channel in channels {
+            if (channel.attribute(forName: "Offset")?.stringValue ?? "").contains(",") { return false }
+            let attributes = ((try? channel.nodes(forXPath: ".//LogicalChannel/@Attribute")) ?? []).compactMap(\.stringValue)
+            if attributes.allSatisfy({ attribute in
+                attribute == "Dummy" || attribute == "NoFeature"
+                    || (attribute.hasPrefix("Dimmer") && Int(attribute.dropFirst(6)) != nil)
+            }) {
+                standIns += 1
+            }
+        }
+        return standIns * 2 > channels.count
+    }
+
+    /// A GDTF that says it's a stand-in: made for the rig rather than the
+    /// fixture. Vectorworks builds its "Custom" ones from a template — a
+    /// "Default" mode of blade channels with no DMX, and a "DMX Mode" of
+    /// "NoFeature" channels — and this app's own dummies say so in their
+    /// description.
+    static func isStandIn(_ document: XMLDocument) -> Bool {
+        guard let fixtureType = (try? document.nodes(forXPath: "//FixtureType"))?.first as? XMLElement else {
+            return false
+        }
+        let manufacturer = (fixtureType.attribute(forName: "Manufacturer")?.stringValue ?? "")
+            .trimmingCharacters(in: .whitespaces).lowercased()
+        let description = (fixtureType.attribute(forName: "Description")?.stringValue ?? "").lowercased()
+        return ["custom", "mvr exploder"].contains(manufacturer)
+            || description.contains("placeholder gdtf")
     }
 
     /// The fixture's geometry tree, as far as footprints need it: which
@@ -160,7 +216,7 @@ enum GDTFFootprintParser {
     /// template channel lands at its own offset plus that, less one — the
     /// GDTF spec's rule. Reading the template's offsets alone made a
     /// 117-channel Pixelline mode look 5 channels wide.
-    private static func channels(in mode: XMLElement, geometries: Geometries) -> [Int: Int] {
+    private static func channels(in mode: XMLElement, geometries: Geometries) -> (byBreak: [Int: Int], parameters: Int) {
         // Every placement of a template in this mode: its breaks, in order.
         typealias Placement = [(dmxBreak: String, offset: Int)]
         let rootName = mode.attribute(forName: "Geometry")?.stringValue ?? ""
@@ -177,6 +233,7 @@ enum GDTFFootprintParser {
         }
 
         var byBreak: [Int: Int] = [:]
+        var parameters = 0
         func reach(_ channel: Int, on dmxBreak: String) {
             let key = Int(dmxBreak) ?? 1
             byBreak[key] = max(byBreak[key] ?? 0, channel)
@@ -197,12 +254,16 @@ enum GDTFFootprintParser {
                     let chosen = channelBreak == "Overwrite"
                         ? breaks.last
                         : breaks.first { $0.dmxBreak == channelBreak }
-                    if let chosen { reach(highest + chosen.offset - 1, on: chosen.dmxBreak) }
+                    if let chosen {
+                        reach(highest + chosen.offset - 1, on: chosen.dmxBreak)
+                        parameters += 1
+                    }
                 }
             } else {
                 reach(highest, on: channelBreak)
+                parameters += 1
             }
         }
-        return byBreak
+        return (byBreak, parameters)
     }
 }

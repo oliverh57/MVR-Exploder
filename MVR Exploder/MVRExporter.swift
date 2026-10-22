@@ -144,7 +144,13 @@ enum MVRExporter {
         let session = document.autoIDSession?
             .mappingKeys { uuidForID[$0] }
             .mappingSpecs { renamedSpecs[$0] ?? $0 }
-        MVRUserData.write(names: names, session: session, in: exportXML)
+        // Only for GDTFs a fixture still uses — an undone replacement
+        // leaves nothing to vouch for.
+        let usedSpecs = Set(document.fixtures.map(\.gdtfSpec))
+        MVRUserData.write(
+            names: names, session: session,
+            gdtfSources: document.gdtfSources.filter { usedSpecs.contains($0.key) },
+            in: exportXML)
 
         // 1. Write the (now fully resolved) scene description.
         let xmlData = exportXML.xmlData(options: .nodePrettyPrint)
@@ -163,10 +169,19 @@ enum MVRExporter {
             if options.replaceAllWithDummyGDTFs && isGDTFPackage { continue }
             guard options.includeSceneGeometry || isGDTFPackage else { continue }
 
+            // Geometry edits: a mesh a delete left unreferenced stays out,
+            // and a simplified one is written in place of the original.
+            let meshName = (entry.path as NSString).lastPathComponent.lowercased()
+            if document.droppedMeshFiles.contains(meshName) { continue }
+
             let scratchName = (entry.path as NSString).lastPathComponent + "-" + UUID().uuidString
             let entryTempURL = workDir.appendingPathComponent(scratchName)
 
-            _ = try sourceArchive.extract(entry, to: entryTempURL)
+            if let replaced = document.replacedMeshFiles[meshName] {
+                try replaced.write(to: entryTempURL)
+            } else {
+                _ = try sourceArchive.extract(entry, to: entryTempURL)
+            }
             try newArchive.addEntry(with: entry.path, fileURL: entryTempURL)
             writtenEntryNames.insert(entry.path.lowercased())
         }

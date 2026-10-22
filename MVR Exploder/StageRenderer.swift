@@ -137,10 +137,10 @@ final class StageScene {
     /// Loads the venue geometry, which is the slow part — real files run
     /// to thousands of objects — so it can be done off the main thread
     /// before the scene is built.
-    nonisolated static func loadGeometry(for url: URL?) async -> MVRSceneGeometryLoader.LoadedGeometry? {
-        guard let url else { return nil }
+    nonisolated static func loadGeometry(for source: MVRGeometrySource?) async -> MVRSceneGeometryLoader.LoadedGeometry? {
+        guard let source else { return nil }
         return await Task.detached(priority: .userInitiated) {
-            MVRSceneGeometryLoader.buildGeometryNode(mvrURL: url)
+            MVRSceneGeometryLoader.buildGeometryNode(source: source)
         }.value
     }
 

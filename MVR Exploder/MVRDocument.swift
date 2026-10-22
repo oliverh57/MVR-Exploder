@@ -109,6 +109,33 @@ final class MVRDocument: ObservableObject {
     /// Export includes these in addition to whatever's in the original zip.
     private(set) var injectedGDTFFiles: [String: Data] = [:]
 
+    /// Scene mesh files rewritten here — simplified — by lowercased file
+    /// name. Export writes these in place of the archive's own copy, and
+    /// everything that draws the scene reads them instead.
+    private(set) var replacedMeshFiles: [String: Data] = [:]
+
+    /// Mesh files nothing refers to any more after a delete, by lowercased
+    /// file name. Left out of the export.
+    private(set) var droppedMeshFiles: Set<String> = []
+
+    /// Whether the scene geometry has been edited since the file was read,
+    /// so anything drawing it has to read this document rather than the
+    /// file on disk.
+    private(set) var hasGeometryEdits = false
+
+    /// GDTFs brought in from GDTF Share, by file name: what makes a type
+    /// "verified". Saved in `<UserData>`, so it's still known on reopening.
+    @Published private(set) var gdtfSources: [String: MVRUserData.GDTFSource] = [:]
+
+    /// Goes up with every geometry edit, undo included, so views showing
+    /// geometry know to rebuild.
+    @Published private(set) var geometryRevision = 0
+
+    /// Goes up only with edits that change what the scene looks like — a
+    /// delete, a simplify, a move — not a rename or a change of layer, so
+    /// a whole-scene view isn't rebuilt for those.
+    @Published private(set) var sceneRevision = 0
+
     /// The window's undo manager, handed over by the view showing this
     /// document. Every edit registers its reverse with it. Nil for a
     /// document nobody edits by hand, like Compare's file B.
@@ -249,10 +276,12 @@ final class MVRDocument: ObservableObject {
         // file drop out on the way.
         self.autoIDSession = MVRUserData.session(in: document)?
             .mappingKeys { idForUUID[$0] }
+        self.gdtfSources = MVRUserData.gdtfSources(in: document)
         self.originalFileURL = url
         self.fileName = url.lastPathComponent
         self.idFieldName = idFieldName
         self.injectedGDTFFiles = [:]
+        resetGeometryEdits()
         isReplacingContents = true
         self.fixtures = parsedFixtures
         isReplacingContents = false
@@ -321,6 +350,10 @@ final class MVRDocument: ObservableObject {
         draft.fileName = fileName
         draft.idFieldName = idFieldName
         draft.injectedGDTFFiles = injectedGDTFFiles
+        draft.gdtfSources = gdtfSources
+        draft.replacedMeshFiles = replacedMeshFiles
+        draft.droppedMeshFiles = droppedMeshFiles
+        draft.hasGeometryEdits = hasGeometryEdits
         draft.groupNames = groupNames
         draft.autoIDSession = autoIDSession
         draft.availableLayers = availableLayers
@@ -342,6 +375,14 @@ final class MVRDocument: ObservableObject {
         if editTags == ownTags { recordEdit(tag) }
         xmlDocument = draft.xmlDocument
         injectedGDTFFiles = draft.injectedGDTFFiles
+        gdtfSources = draft.gdtfSources
+        replacedMeshFiles = draft.replacedMeshFiles
+        droppedMeshFiles = draft.droppedMeshFiles
+        if draft.hasGeometryEdits {
+            hasGeometryEdits = true
+            geometryRevision += 1
+            sceneRevision += 1
+        }
         groupNames = draft.groupNames
         autoIDSession = draft.autoIDSession
         availableLayers = draft.availableLayers
@@ -371,6 +412,8 @@ final class MVRDocument: ObservableObject {
         availableLayers = []
         idFieldName = "FixtureID"
         injectedGDTFFiles = [:]
+        gdtfSources = [:]
+        resetGeometryEdits()
         undoManager?.removeAllActions(withTarget: self)
     }
 
@@ -798,7 +841,7 @@ final class MVRDocument: ObservableObject {
         setGDTFModes([id: newMode])
     }
 
-    /// Several modes in one change — Mode Swap moving a whole type — so
+    /// Several modes in one change — the Mode Viewer moving a whole type — so
     /// the fixture list updates once and undoes in one step.
     func setGDTFModes(_ newModes: [String: String]) {
         var updated = fixtures
@@ -826,10 +869,16 @@ final class MVRDocument: ObservableObject {
     /// that GDTF — which is exactly the "missing GDTF" case the dummy
     /// generator also handles.
     func gdtfFileData(forSpec rawSpec: String) -> Data? {
-        guard let url = originalFileURL, let archive = try? Archive(url: url, accessMode: .read) else { return nil }
         let rawFileName = (rawSpec as NSString).lastPathComponent.lowercased()
         let withExtension = rawFileName.hasSuffix(".gdtf") ? rawFileName : rawFileName + ".gdtf"
         let candidates: Set<String> = [rawFileName, withExtension]
+
+        // One brought in here — from GDTF Share, or another file — before
+        // the file's own, which it was brought in to replace.
+        if let injected = injectedGDTFFiles.first(where: { candidates.contains($0.key.lowercased()) }) {
+            return injected.value
+        }
+        guard let url = originalFileURL, let archive = try? Archive(url: url, accessMode: .read) else { return nil }
 
         guard let entry = archive.first(where: { candidates.contains(($0.path as NSString).lastPathComponent.lowercased()) }) else {
             return nil
@@ -841,6 +890,72 @@ final class MVRDocument: ObservableObject {
 
     /// Stores extra GDTF bytes to be included at export time, alongside
     /// whatever this document's own original zip provides.
+    /// Swaps a fixture type's GDTF for another — one from GDTF Share — and
+    /// moves its fixtures onto the new GDTF's modes, all as one undo step.
+    /// `modes` maps each mode in use to the new GDTF's; one left out keeps
+    /// its name. The new GDTF goes into the file on export.
+    func replaceGDTF(
+        _ spec: String, withFile fileName: String, data: Data, modes: [String: String],
+        source: MVRUserData.GDTFSource? = nil
+    ) {
+        let previousData = injectedGDTFFiles[fileName]
+        let previousSource = gdtfSources[fileName]
+        injectedGDTFFiles[fileName] = data
+        gdtfSources[fileName] = source
+
+        var updated = fixtures
+        var previous: [String: (spec: String, mode: String)] = [:]
+        for index in updated.indices where updated[index].gdtfSpec == spec {
+            let fixture = updated[index]
+            previous[fixture.id] = (fixture.gdtfSpec, fixture.mode)
+            updated[index].gdtfSpec = fileName
+            updated[index].mode = modes[fixture.mode] ?? fixture.mode
+            Self.write(spec: fileName, mode: updated[index].mode, to: fixture.xmlElement)
+        }
+        guard !previous.isEmpty else {
+            injectedGDTFFiles[fileName] = previousData
+            gdtfSources[fileName] = previousSource
+            return
+        }
+        fixtures = updated
+        recordEdit("GDTF")
+        registerUndo("Replace GDTF") {
+            $0.restoreGDTF(
+                previous, file: fileName, data: previousData, source: previousSource,
+                redo: (spec, data, modes, source))
+        }
+    }
+
+    private func restoreGDTF(
+        _ previous: [String: (spec: String, mode: String)], file fileName: String, data: Data?,
+        source: MVRUserData.GDTFSource?,
+        redo: (spec: String, data: Data, modes: [String: String], source: MVRUserData.GDTFSource?)
+    ) {
+        var updated = fixtures
+        for index in updated.indices {
+            guard let was = previous[updated[index].id] else { continue }
+            updated[index].gdtfSpec = was.spec
+            updated[index].mode = was.mode
+            Self.write(spec: was.spec, mode: was.mode, to: updated[index].xmlElement)
+        }
+        injectedGDTFFiles[fileName] = data
+        gdtfSources[fileName] = source
+        fixtures = updated
+        registerUndo("Replace GDTF") {
+            $0.replaceGDTF(redo.spec, withFile: fileName, data: redo.data, modes: redo.modes, source: redo.source)
+        }
+    }
+
+    private static func write(spec: String, mode: String, to element: XMLElement) {
+        for (name, value) in [("GDTFSpec", spec), ("GDTFMode", mode)] {
+            if let existing = element.elements(forName: name).first {
+                existing.stringValue = value
+            } else {
+                element.addChild(XMLElement(name: name, stringValue: value))
+            }
+        }
+    }
+
     func injectGDTFFile(named fileName: String, data: Data) {
         injectedGDTFFiles[fileName] = data
         noteEdit()
@@ -1059,6 +1174,271 @@ final class MVRDocument: ObservableObject {
             attribute.stringValue = value
         } else if let attribute = XMLNode.attribute(withName: "uuid", stringValue: value) as? XMLNode {
             element.addAttribute(attribute)
+        }
+    }
+}
+
+// MARK: - Scene geometry
+
+extension MVRDocument {
+
+    /// Where to read the scene geometry from: the file, plus this
+    /// document's own changes to it once there are any. Until then the
+    /// scene description isn't serialised at all, so an unedited file
+    /// costs nothing extra.
+    var geometrySource: MVRGeometrySource? {
+        guard let originalFileURL else { return nil }
+        return MVRGeometrySource(
+            url: originalFileURL,
+            sceneXML: hasGeometryEdits ? xmlDocument?.xmlData : nil,
+            meshOverrides: replacedMeshFiles)
+    }
+
+    fileprivate func resetGeometryEdits() {
+        replacedMeshFiles = [:]
+        droppedMeshFiles = []
+        hasGeometryEdits = false
+        geometryRevision += 1
+        sceneRevision += 1
+    }
+
+    private func noteGeometryEdit(reshapes: Bool = true) {
+        hasGeometryEdits = true
+        geometryRevision += 1
+        if reshapes { sceneRevision += 1 }
+        noteEdit()
+    }
+
+    /// Objects by key, as `MVRSceneGeometryLoader.objectKeys(_:)` gives
+    /// them.
+    private func geometryObjects(_ keys: Set<String>) -> [XMLElement] {
+        let elements = geometryObjectElements()
+        return zip(MVRSceneGeometryLoader.objectKeys(elements), elements)
+            .filter { keys.contains($0.0) }
+            .map(\.1)
+    }
+
+    /// Every object that can carry geometry, in the order the inspector
+    /// and the scene loader number them.
+    private func geometryObjectElements() -> [XMLElement] {
+        ((try? xmlDocument?.nodes(forXPath: MVRSceneGeometryLoader.geometryObjectsXPath)) ?? [])
+            .compactMap { $0 as? XMLElement }
+    }
+
+    /// Deletes symbols, every placement of them, and any object those
+    /// placements leave with no geometry at all — the truss whose only
+    /// model was this symbol goes with it, rather than staying behind as
+    /// an empty marker.
+    func deleteSymbols(_ uuids: Set<String>) {
+        guard let xmlDocument else { return }
+        let wanted = Set(uuids.map { $0.lowercased() })
+        let objectTags = MVRSceneGeometryLoader.geometryObjectTags
+
+        var targets: [XMLNode] = []
+        var owners: [XMLElement] = []
+        for case let element as XMLElement in (try? xmlDocument.nodes(forXPath: "//Symdef | //Symbol")) ?? [] {
+            if element.name == "Symdef" {
+                if let uuid = element.attribute(forName: "uuid")?.stringValue?.lowercased(), wanted.contains(uuid) {
+                    targets.append(element)
+                }
+            } else if let reference = element.attribute(forName: "symdef")?.stringValue?.lowercased(),
+                      wanted.contains(reference) {
+                targets.append(element)
+                if let geometries = element.parent as? XMLElement, geometries.name == "Geometries",
+                   let owner = geometries.parent as? XMLElement, objectTags.contains(owner.name ?? "") {
+                    owners.append(owner)
+                }
+            }
+        }
+
+        let going = Set(targets.map(ObjectIdentifier.init))
+        var seen = Set<ObjectIdentifier>()
+        for owner in owners where seen.insert(ObjectIdentifier(owner)).inserted {
+            let left = owner.elements(forName: "Geometries")
+                .flatMap { $0.children ?? [] }
+                .contains { $0.kind == .element && !going.contains(ObjectIdentifier($0)) }
+            if !left, !Self.holdsChildren(owner) { targets.append(owner) }
+        }
+        removeGeometry(targets, actionName: uuids.count == 1 ? "Delete Symbol" : "Delete Symbols")
+    }
+
+    /// Deletes objects by key. An object other things sit inside — a
+    /// scene object holding fixtures is common — only loses its own
+    /// geometry, so what it holds stays.
+    func deleteGeometryObjects(_ keys: Set<String>) {
+        var targets: [XMLNode] = []
+        for element in geometryObjects(keys) {
+            if Self.holdsChildren(element) {
+                targets += element.elements(forName: "Geometries")
+            } else {
+                targets.append(element)
+            }
+        }
+        removeGeometry(targets, actionName: keys.count == 1 ? "Delete Object" : "Delete Objects")
+    }
+
+    /// Renames an object; an empty name removes the attribute.
+    func renameGeometryObject(_ key: String, to name: String) {
+        guard let element = geometryObjects([key]).first else { return }
+        let old = element.attribute(forName: "name")?.stringValue
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard trimmed != (old ?? "") else { return }
+        setNameAttribute(trimmed.isEmpty ? nil : trimmed, on: element)
+        noteGeometryEdit(reshapes: false)
+        registerUndo("Rename Object") { $0.renameGeometryObject(key, to: old ?? "") }
+    }
+
+    private func setNameAttribute(_ value: String?, on element: XMLElement) {
+        element.removeAttribute(forName: "name")
+        if let value, let attribute = XMLNode.attribute(withName: "name", stringValue: value) as? XMLNode {
+            element.addAttribute(attribute)
+        }
+    }
+
+    /// Moves objects to the end of another layer. One holding fixtures is
+    /// left where it is: the fixtures would go with it, and the fixture
+    /// list's layers would then be wrong.
+    func moveGeometryObjects(_ keys: Set<String>, toLayer layerUUID: String) {
+        guard let xmlDocument else { return }
+        let target = ((try? xmlDocument.nodes(forXPath: "//Layer")) ?? [])
+            .compactMap { $0 as? XMLElement }
+            .first { $0.attribute(forName: "uuid")?.stringValue?.lowercased() == layerUUID.lowercased() }
+        guard let target else { return }
+        let list: XMLElement
+        if let existing = target.elements(forName: "ChildList").first {
+            list = existing
+        } else {
+            list = XMLElement(name: "ChildList")
+            target.addChild(list)
+        }
+
+        let moving = geometryObjects(keys).filter { element in
+            !Self.holdsFixture(element) && element.parent !== list
+        }
+        let origins = moving.compactMap { element -> RemovedNode? in
+            guard let parent = element.parent as? XMLElement else { return nil }
+            return RemovedNode(node: element, parent: parent, index: element.index)
+        }
+        guard !origins.isEmpty else { return }
+        for origin in origins {
+            origin.node.detach()
+            list.addChild(origin.node)
+        }
+        noteGeometryEdit(reshapes: false)
+        registerUndo(origins.count == 1 ? "Move Object to Layer" : "Move Objects to Layer") {
+            $0.putBack(origins, actionName: origins.count == 1 ? "Move Object to Layer" : "Move Objects to Layer", redo: {
+                $0.moveGeometryObjects(keys, toLayer: layerUUID)
+            })
+        }
+    }
+
+    private func putBack(_ origins: [RemovedNode], actionName: String, redo: @escaping (MVRDocument) -> Void) {
+        for origin in origins { origin.node.detach() }
+        for origin in origins.sorted(by: { $0.index < $1.index }) {
+            origin.parent.insertChild(origin.node, at: min(origin.index, origin.parent.childCount))
+        }
+        noteGeometryEdit(reshapes: false)
+        registerUndo(actionName, redo)
+    }
+
+    /// Moves an object to a position in millimetres, keeping its
+    /// rotation. One without a `<Matrix>` gets one.
+    func setGeometryObjectPosition(_ key: String, to position: SIMD3<Double>) {
+        guard let element = geometryObjects([key]).first else { return }
+        let matrix = element.elements(forName: "Matrix").first
+        let old = matrix?.stringValue
+        setMatrixText(MVRSceneGeometryLoader.matrixText(old, movedTo: position), on: element)
+        noteGeometryEdit()
+        registerUndo("Move Object") { $0.restoreMatrix(key, to: old) }
+    }
+
+    private func restoreMatrix(_ key: String, to text: String?) {
+        guard let element = geometryObjects([key]).first else { return }
+        let current = element.elements(forName: "Matrix").first?.stringValue
+        setMatrixText(text, on: element)
+        noteGeometryEdit()
+        registerUndo("Move Object") { $0.restoreMatrix(key, to: current) }
+    }
+
+    /// Nil removes the matrix. A new one goes first, where MVR puts it.
+    private func setMatrixText(_ text: String?, on element: XMLElement) {
+        if let existing = element.elements(forName: "Matrix").first {
+            if let text { existing.stringValue = text } else { existing.detach() }
+        } else if let text {
+            element.insertChild(XMLElement(name: "Matrix", stringValue: text), at: 0)
+        }
+    }
+
+    /// Swaps in rewritten mesh files, by lowercased file name.
+    func replaceMeshFiles(_ files: [String: Data]) {
+        setMeshFiles(files.mapValues { Optional($0) }, actionName: "Simplify Geometry")
+    }
+
+    private func setMeshFiles(_ files: [String: Data?], actionName: String) {
+        guard !files.isEmpty else { return }
+        var previous: [String: Data?] = [:]
+        for (name, data) in files {
+            previous[name] = replacedMeshFiles[name]
+            replacedMeshFiles[name] = data
+        }
+        noteGeometryEdit()
+        registerUndo(actionName) { $0.setMeshFiles(previous, actionName: actionName) }
+    }
+
+    private struct RemovedNode {
+        let node: XMLNode
+        let parent: XMLElement
+        let index: Int
+    }
+
+    /// Detaches `nodes` and drops the mesh files nothing refers to any
+    /// more. A node inside another that's going is left where it is, so
+    /// an undo puts each back into the parent it came out of.
+    private func removeGeometry(_ nodes: [XMLNode], actionName: String) {
+        let going = Set(nodes.map(ObjectIdentifier.init))
+        let removed = nodes.compactMap { node -> RemovedNode? in
+            guard let parent = node.parent as? XMLElement else { return nil }
+            var ancestor: XMLNode? = parent
+            while let current = ancestor {
+                if going.contains(ObjectIdentifier(current)) { return nil }
+                ancestor = current.parent
+            }
+            return RemovedNode(node: node, parent: parent, index: node.index)
+        }
+        guard !removed.isEmpty else { return }
+
+        let before = referencedMeshFiles()
+        for entry in removed { entry.node.detach() }
+        let previouslyDropped = droppedMeshFiles
+        droppedMeshFiles.formUnion(before.subtracting(referencedMeshFiles()))
+        noteGeometryEdit()
+        registerUndo(actionName) { $0.restoreGeometry(removed, dropped: previouslyDropped, actionName: actionName) }
+    }
+
+    private func restoreGeometry(_ removed: [RemovedNode], dropped: Set<String>, actionName: String) {
+        for entry in removed.sorted(by: { $0.index < $1.index }) {
+            entry.parent.insertChild(entry.node, at: min(entry.index, entry.parent.childCount))
+        }
+        droppedMeshFiles = dropped
+        noteGeometryEdit()
+        registerUndo(actionName) { $0.removeGeometry(removed.map(\.node), actionName: actionName) }
+    }
+
+    private func referencedMeshFiles() -> Set<String> {
+        let names = ((try? xmlDocument?.nodes(forXPath: "//Geometry3D/@fileName")) ?? []).compactMap(\.stringValue)
+        return Set(names.map { ($0 as NSString).lastPathComponent.lowercased() })
+    }
+
+    private static func holdsFixture(_ element: XMLElement) -> Bool {
+        (element.children ?? []).contains { child in
+            guard let child = child as? XMLElement else { return false }
+            return child.name == "Fixture" || holdsFixture(child)
+        }
+    }
+
+    private static func holdsChildren(_ element: XMLElement) -> Bool {
+        element.elements(forName: "ChildList").contains { list in
+            (list.children ?? []).contains { $0.kind == .element }
         }
     }
 }

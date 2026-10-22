@@ -121,7 +121,7 @@ struct SingleEditView: View {
     /// The row count is used to pick the right table out of whatever windows
     /// are open, and everything here is best-effort: if the view tree ever
     /// stops looking like this, the selection and flash still happen.
-    private static func scrollTableToRow(_ row: Int, rowCount: Int) {
+    static func scrollTableToRow(_ row: Int, rowCount: Int) {
         func firstTableView(in view: NSView) -> NSTableView? {
             if let table = view as? NSTableView { return table }
             for subview in view.subviews {

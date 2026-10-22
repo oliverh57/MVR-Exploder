@@ -136,6 +136,50 @@ final class FootprintTests: XCTestCase {
         // Three control channels, then the pixel at 4–6, 7–9 and 10–12:
         // the last copy ends at its template offset 3, plus 10, less 1.
         XCTAssertEqual(GDTFFootprintParser.modes(description: document)[0].channels, 12)
+        // Two control attributes (one 16-bit), then three per pixel.
+        XCTAssertEqual(GDTFFootprintParser.modes(description: document)[0].parameters, 11)
+    }
+
+    /// MA's own example: dimmer, pan, pan fine, tilt, tilt fine is five
+    /// DMX channels but "only costs 3 parameters" — fine bytes are free.
+    /// A virtual channel takes no DMX and isn't counted.
+    func testGrandMA3ParametersCountEachAttributeOnce() throws {
+        let document = try gdtf("""
+        <DMXMode Name="Standard">
+          <DMXChannels>
+            <DMXChannel DMXBreak="1" Offset="1"/>
+            <DMXChannel DMXBreak="1" Offset="2,3"/>
+            <DMXChannel DMXBreak="1" Offset="4,5"/>
+            <DMXChannel DMXBreak="1" Offset=""/>
+          </DMXChannels>
+        </DMXMode>
+        """)
+        let mode = GDTFFootprintParser.modes(description: document)[0]
+        XCTAssertEqual(mode.channels, 5)
+        XCTAssertEqual(mode.parameters, 3)
+    }
+
+    /// Exporters stand in for a missing GDTF with one byte per channel and
+    /// a made-up attribute; that has to read as "parameters unknown", not
+    /// as a fixture with no 16-bit channels.
+    func testPlaceholderGDTFsAreRecognised() throws {
+        func mode(_ attributes: [String], offsets: [String]) throws -> GDTFFootprint {
+            let channels = zip(attributes, offsets).map { attribute, offset in
+                "<DMXChannel DMXBreak=\"1\" Offset=\"\(offset)\"><LogicalChannel Attribute=\"\(attribute)\"/></DMXChannel>"
+            }.joined()
+            return GDTFFootprintParser.modes(description: try gdtf("<DMXMode Name=\"M\"><DMXChannels>\(channels)</DMXChannels></DMXMode>"))[0]
+        }
+        XCTAssertTrue(try mode(["Dummy", "Dummy", "Dummy"], offsets: ["1", "2", "3"]).isPlaceholder)
+        XCTAssertTrue(try mode(["Dimmer1", "Dimmer2", "Dimmer3"], offsets: ["1", "2", "3"]).isPlaceholder)
+        XCTAssertFalse(try mode(["Dimmer", "Pan", "Tilt"], offsets: ["1", "2", "3"]).isPlaceholder)
+        XCTAssertFalse(try mode(["Dimmer1", "Dimmer2"], offsets: ["1", "2,3"]).isPlaceholder)
+    }
+
+    func testTheSmallestHardwareThatCoversTheRig() {
+        XCTAssertEqual(ModeViewerView.hardware(for: 4_096), "fits 4,096 (onPC + wing or 4k node)")
+        XCTAssertEqual(ModeViewerView.hardware(for: 4_097), "needs 8,192 (compact, PU L)")
+        XCTAssertEqual(ModeViewerView.hardware(for: 16_385), "needs 20,480 (full-size)")
+        XCTAssertEqual(ModeViewerView.hardware(for: 30_000), "over 20,480 — add processing units")
     }
 
     func testNonsenseGivesNoModesRatherThanCrashing() {

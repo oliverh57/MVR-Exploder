@@ -2,6 +2,7 @@ import Foundation
 import SceneKit
 import AppKit
 import ZIPFoundation
+import CryptoKit
 
 // MARK: - glTF binary (.glb)
 
@@ -212,6 +213,31 @@ enum GLBParser {
     }
 }
 
+// MARK: - Where geometry comes from
+
+/// An MVR's scene geometry as a document currently has it: the file, the
+/// scene description if it has been edited since, and any mesh files
+/// rewritten here. Plain data, so a background load can take it.
+nonisolated struct MVRGeometrySource: Sendable {
+    let url: URL
+    /// The edited scene description, or nil to read the file's own.
+    let sceneXML: Data?
+    /// Rewritten mesh files by lowercased file name, read instead of the
+    /// archive's copies.
+    let meshOverrides: [String: Data]
+
+    func readSceneDescription() -> XMLDocument? {
+        if let sceneXML { return try? XMLDocument(data: sceneXML, options: []) }
+        guard
+            let archive = try? Archive(url: url, accessMode: .read),
+            let entry = archive["GeneralSceneDescription.xml"]
+        else { return nil }
+        var data = Data()
+        _ = try? archive.extract(entry) { data.append($0) }
+        return try? XMLDocument(data: data, options: [])
+    }
+}
+
 // MARK: - Scene geometry loader
 
 /// Builds the SceneKit node tree for an MVR's non-fixture geometry — set,
@@ -244,6 +270,10 @@ enum MVRSceneGeometryLoader {
         let id: String
         let name: String
         let layerUUID: String
+        /// The object's key, as `objectKeys(_:)` gives it, so a click in a
+        /// view built from this can be traced back to the object in the
+        /// file. Nil for a layer merged into one node, which is many.
+        var key: String? = nil
     }
 
     /// Lets a finished node tree cross back from the loading task. SCNNode
@@ -285,7 +315,12 @@ enum MVRSceneGeometryLoader {
     /// re-reads the scene description itself — that keeps it free of any
     /// main-actor state and safe to run on a background task.
     nonisolated static func buildGeometryNode(mvrURL url: URL) -> LoadedGeometry {
-        buildNode(mvrURL: url)
+        buildNode(source: MVRGeometrySource(url: url, sceneXML: nil, meshOverrides: [:]))
+    }
+
+    /// The same, for a document whose geometry may have been edited.
+    nonisolated static func buildGeometryNode(source: MVRGeometrySource) -> LoadedGeometry {
+        buildNode(source: source)
     }
 
     /// A mesh parsed into plain arrays, already in scene space (metres, Y
@@ -310,46 +345,25 @@ enum MVRSceneGeometryLoader {
         let transform: SCNMatrix4
     }
 
-    /// Vertex ceiling for one merged geometry. Merging is what makes a large
-    /// file navigable — a CAD-exported venue arrives as tens of thousands of
-    /// tiny separate meshes, and a draw call each is what makes it crawl —
-    /// but merging *everything* into one geometry would equally defeat
-    /// SceneKit's frustum culling, so the merge is chunked: few enough nodes
-    /// to be cheap to draw, enough of them that off-screen parts can still
-    /// be skipped.
-    private static let maxVerticesPerMergedChunk = 120_000
+    /// Resolves `<Geometry3D>` and `<Symbol>` references into mesh
+    /// placements, caching each symdef's own placements so one used many
+    /// times is only walked once. Shared by the whole-scene build and the
+    /// Geometry Inspector's one-symbol-at-a-time build.
+    private nonisolated final class PlacementResolver {
+        /// Every symdef by lowercased uuid, so `<Symbol symdef="…">` can
+        /// resolve.
+        let symdefElements: [String: XMLElement]
+        private var symdefPlacements: [String: [MeshPlacement]] = [:]
 
-    /// A layer with more objects than this, essentially all of them
-    /// nameless, is merged into one selectable object instead of being kept
-    /// object-by-object.
-    ///
-    /// Naming turns out to separate the two kinds of file cleanly. Measured
-    /// across five real venue exports: a CAD explosion had **60,592 objects,
-    /// 100% unnamed** (every tube and bolt of the staging emitted
-    /// separately), while every hand-built show — 4,540, 2,565, 1,718 and
-    /// 1,202 objects — was **0% unnamed**. So this only ever catches the
-    /// case where per-object selection was worthless anyway, and leaves real
-    /// shows selectable exactly as before.
-    private static let bulkLayerMinimumObjects = 500
-    private static let bulkLayerUnnamedFraction = 0.9
-
-    private nonisolated static func buildNode(mvrURL url: URL) -> LoadedGeometry {
-        let empty = LoadedGeometry(node: nil, layers: [], objects: [])
-        guard let archive = try? Archive(url: url, accessMode: .read) else { return empty }
-        guard let sceneEntry = archive["GeneralSceneDescription.xml"] else { return empty }
-        var xmlData = Data()
-        _ = try? archive.extract(sceneEntry) { xmlData.append($0) }
-        guard let xmlDocument = try? XMLDocument(data: xmlData, options: []) else { return empty }
-
-        // Index every symdef by uuid so <Symbol symdef="…"> can resolve.
-        var symdefElements: [String: XMLElement] = [:]
-        for case let element as XMLElement in (try? xmlDocument.nodes(forXPath: "//Symdef")) ?? [] {
-            if let uuid = element.attribute(forName: "uuid")?.stringValue?.lowercased() {
-                symdefElements[uuid] = element
+        init(xmlDocument: XMLDocument) {
+            var elements: [String: XMLElement] = [:]
+            for case let element as XMLElement in (try? xmlDocument.nodes(forXPath: "//Symdef")) ?? [] {
+                if let uuid = element.attribute(forName: "uuid")?.stringValue?.lowercased() {
+                    elements[uuid] = element
+                }
             }
+            symdefElements = elements
         }
-
-        var symdefPlacements: [String: [MeshPlacement]] = [:]
 
         /// Collects (or returns cached) placements for one symdef, in the
         /// symdef's own space. `stack` guards against a symdef that
@@ -404,15 +418,96 @@ enum MVRSceneGeometryLoader {
                 }
             }
         }
+    }
+
+    /// Vertex ceiling for one merged geometry. Merging is what makes a large
+    /// file navigable — a CAD-exported venue arrives as tens of thousands of
+    /// tiny separate meshes, and a draw call each is what makes it crawl —
+    /// but merging *everything* into one geometry would equally defeat
+    /// SceneKit's frustum culling, so the merge is chunked: few enough nodes
+    /// to be cheap to draw, enough of them that off-screen parts can still
+    /// be skipped.
+    private static let maxVerticesPerMergedChunk = 120_000
+
+    /// A layer with more objects than this, essentially all of them
+    /// nameless, is merged into one selectable object instead of being kept
+    /// object-by-object.
+    ///
+    /// Naming turns out to separate the two kinds of file cleanly. Measured
+    /// across five real venue exports: a CAD explosion had **60,592 objects,
+    /// 100% unnamed** (every tube and bolt of the staging emitted
+    /// separately), while every hand-built show — 4,540, 2,565, 1,718 and
+    /// 1,202 objects — was **0% unnamed**. So this only ever catches the
+    /// case where per-object selection was worthless anyway, and leaves real
+    /// shows selectable exactly as before.
+    /// Every MVR object type that can carry its own `<Geometries>`, in
+    /// document order. `<SceneObject>` alone missed most rigging: one real
+    /// festival file has 7,692 `<Truss>`, 45 `<Support>` and 5
+    /// `<VideoScreen>` objects against 709 scene objects. Across the local
+    /// sample files none of these sits inside another, so no object's
+    /// meshes get collected twice.
+    nonisolated static let geometryObjectsXPath =
+        "//SceneObject | //Truss | //Support | //VideoScreen | //Projector | //FocusPoint"
+
+    /// What identifies each object across edits: its uuid, lowercased —
+    /// every object in every real file checked has one, all unique — or,
+    /// failing that, its place in the file.
+    nonisolated static func objectKeys(_ elements: [XMLElement]) -> [String] {
+        let uuids = elements.map { $0.attribute(forName: "uuid")?.stringValue?.lowercased() ?? "" }
+        var counts: [String: Int] = [:]
+        for uuid in uuids where !uuid.isEmpty { counts[uuid, default: 0] += 1 }
+        return uuids.enumerated().map { index, uuid in
+            !uuid.isEmpty && counts[uuid] == 1 ? uuid : "#\(index)"
+        }
+    }
+
+    /// An MVR `<Matrix>`'s translation, in millimetres; nil without one.
+    nonisolated static func translation(ofMatrixText text: String) -> SIMD3<Double>? {
+        let values = numbers(in: text).map(Double.init)
+        guard values.count >= 12 else { return nil }
+        return SIMD3(values[9], values[10], values[11])
+    }
+
+    /// `text` with its translation replaced, keeping the rotation; an
+    /// identity rotation when there's no matrix to keep.
+    nonisolated static func matrixText(_ text: String?, movedTo position: SIMD3<Double>) -> String {
+        var values = numbers(in: text ?? "").map(Double.init)
+        if values.count < 12 { values = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0] }
+        values[9] = position.x; values[10] = position.y; values[11] = position.z
+        func group(_ range: Range<Int>) -> String {
+            "{" + values[range].map { String(format: "%.6f", $0) }.joined(separator: ",") + "}"
+        }
+        return group(0..<3) + group(3..<6) + group(6..<9) + group(9..<12)
+    }
+
+    /// The element names in `geometryObjectsXPath`.
+    nonisolated static let geometryObjectTags: Set<String> = [
+        "SceneObject", "Truss", "Support", "VideoScreen", "Projector", "FocusPoint",
+    ]
+
+    private static let bulkLayerMinimumObjects = 500
+    private static let bulkLayerUnnamedFraction = 0.9
+
+    private nonisolated static func buildNode(source: MVRGeometrySource) -> LoadedGeometry {
+        let empty = LoadedGeometry(node: nil, layers: [], objects: [])
+        guard let xmlDocument = source.readSceneDescription() else { return empty }
+
+        let resolver = PlacementResolver(xmlDocument: xmlDocument)
 
         // Pass 1: read the structure. No mesh file is touched yet, so this is
         // pure XML work, and it establishes exactly which meshes are actually
         // referenced — anything unreferenced never gets parsed at all.
         var pendingObjects: [(element: XMLElement, placements: [MeshPlacement])] = []
         var usedMeshKeys: Set<String> = []
-        for case let sceneObject as XMLElement in (try? xmlDocument.nodes(forXPath: "//SceneObject")) ?? [] {
+        let objectElements = ((try? xmlDocument.nodes(forXPath: geometryObjectsXPath)) ?? [])
+            .compactMap { $0 as? XMLElement }
+        var keyOfElement: [ObjectIdentifier: String] = [:]
+        for (element, key) in zip(objectElements, objectKeys(objectElements)) {
+            keyOfElement[ObjectIdentifier(element)] = key
+        }
+        for sceneObject in objectElements {
             var objectPlacements: [MeshPlacement] = []
-            collectPlacements(of: sceneObject, accumulated: SCNMatrix4Identity, into: &objectPlacements, stack: [])
+            resolver.collectPlacements(of: sceneObject, accumulated: SCNMatrix4Identity, into: &objectPlacements, stack: [])
             guard !objectPlacements.isEmpty else { continue }
             for placement in objectPlacements { usedMeshKeys.insert(placement.meshKey) }
             pendingObjects.append((sceneObject, objectPlacements))
@@ -423,7 +518,7 @@ enum MVRSceneGeometryLoader {
         // a big file — one real venue export references 19,508 distinct
         // meshes — and each file is independent, so it's spread over the
         // cores.
-        let meshes = parseMeshes(keys: Array(usedMeshKeys), mvrURL: url)
+        let meshes = parseMeshes(keys: Array(usedMeshKeys), source: source)
 
         // Pass 3: build the node tree from the parsed meshes.
         let root = SCNNode()
@@ -531,7 +626,8 @@ enum MVRSceneGeometryLoader {
             objects.append(SceneGeometryObject(
                 id: objectID,
                 name: sceneObject.attribute(forName: "name")?.stringValue ?? "Object",
-                layerUUID: key))
+                layerUUID: key,
+                key: keyOfElement[ObjectIdentifier(sceneObject)]))
             if layerNodes[key] == nil {
                 let layerNode = SCNNode()
                 layerNode.name = key
@@ -576,15 +672,28 @@ enum MVRSceneGeometryLoader {
     /// `Archive` it came from, so entries indexed through one handle extract
     /// correctly through another on the same file. Each worker still needs
     /// its own `Archive`, since a handle can't be read from concurrently.
-    private nonisolated static func parseMeshes(keys: [String], mvrURL url: URL) -> [String: RawSceneMesh] {
+    private nonisolated static func parseMeshes(keys: [String], source: MVRGeometrySource) -> [String: RawSceneMesh] {
         guard !keys.isEmpty else { return [:] }
-        guard let indexArchive = try? Archive(url: url, accessMode: .read) else { return [:] }
+        guard let entriesByName = archiveIndex(mvrURL: source.url) else { return [:] }
+        return parseMeshes(keys: keys, mvrURL: source.url, index: entriesByName, overrides: source.meshOverrides)
+    }
 
+    /// Every archive entry by lowercased file name.
+    private nonisolated static func archiveIndex(mvrURL url: URL) -> [String: Entry]? {
+        guard let indexArchive = try? Archive(url: url, accessMode: .read) else { return nil }
         var entriesByName: [String: Entry] = [:]
         for entry in indexArchive {
             let name = (entry.path as NSString).lastPathComponent.lowercased()
             if entriesByName[name] == nil { entriesByName[name] = entry }
         }
+        return entriesByName
+    }
+
+    private nonisolated static func parseMeshes(
+        keys: [String], mvrURL url: URL, index entriesByName: [String: Entry],
+        overrides: [String: Data] = [:]
+    ) -> [String: RawSceneMesh] {
+        guard !keys.isEmpty else { return [:] }
         // Read-only from every worker once built.
         nonisolated(unsafe) let sharedIndex = entriesByName
 
@@ -604,7 +713,9 @@ enum MVRSceneGeometryLoader {
                 var index = worker
                 while index < keys.count {
                     let key = keys[index]
-                    if let entry = sharedIndex[key] {
+                    if let replaced = overrides[key] {
+                        slots[index] = rawMesh(from: replaced, key: key)
+                    } else if let entry = sharedIndex[key] {
                         var data = Data()
                         _ = try? archive.extract(entry) { data.append($0) }
                         if !data.isEmpty {
@@ -835,5 +946,297 @@ enum MVRSceneGeometryLoader {
 
         let inverse = SCNMatrix4Invert(mvrToScene)
         return SCNMatrix4Mult(SCNMatrix4Mult(inverse, basis), mvrToScene)
+    }
+}
+
+// MARK: - One symbol or object at a time
+
+extension MVRSceneGeometryLoader {
+
+    /// One symbol or object built on its own, for the Geometry Inspector.
+    struct SymbolPreview: @unchecked Sendable {
+        /// Its meshes, in its own space (metres, Y up).
+        let node: SCNNode
+        let boundingBox: (min: SCNVector3, max: SCNVector3)
+        let triangleCount: Int
+        /// Meshes it places, nesting included.
+        let meshPlacementCount: Int
+        /// Placed meshes whose file is missing from the archive or
+        /// couldn't be read.
+        let missingMeshCount: Int
+    }
+
+    /// What the inspector's "Select Same…" matches objects on.
+    struct ObjectTraits: Sendable {
+        /// Equal for objects that draw the same thing: the same symbols,
+        /// and own meshes with identical contents. Most "one-off" meshes
+        /// aren't: one real file's 8,011 mesh files hold 293 distinct
+        /// shapes. Nil for an object with no geometry.
+        let model: String?
+        /// Its materials' colours, as 0xRRGGBB.
+        let colours: Set<UInt32>
+    }
+
+    /// What a simplify run produced.
+    struct SimplifyResult: Sendable {
+        /// Rewritten mesh files by lowercased file name; only the ones
+        /// that actually got smaller.
+        let files: [String: Data]
+        let trianglesBefore: Int
+        let trianglesAfter: Int
+        /// Meshes looked at, rewritten or not.
+        let meshCount: Int
+    }
+
+    /// A file's geometry, read once and then built a piece at a time as
+    /// it's asked for. Parsed meshes are kept, so going back to something,
+    /// or on to another piece sharing its meshes, doesn't unzip them again.
+    actor SymbolLibrary {
+        private let source: MVRGeometrySource
+        private let xmlDocument: XMLDocument
+        private let resolver: PlacementResolver
+        private let index: [String: Entry]
+        /// By `objectKeys(_:)`, as `GeometryInventory.objects` and the
+        /// document's object edits identify them.
+        private let objects: [String: XMLElement]
+        private var meshes: [String: RawSceneMesh] = [:]
+        private var unreadable: Set<String> = []
+
+        /// Nil when the file can't be opened or has no scene description.
+        init?(source: MVRGeometrySource) {
+            guard
+                let xmlDocument = source.readSceneDescription(),
+                let index = MVRSceneGeometryLoader.archiveIndex(mvrURL: source.url)
+            else { return nil }
+
+            self.source = source
+            self.xmlDocument = xmlDocument
+            self.resolver = PlacementResolver(xmlDocument: xmlDocument)
+            self.index = index
+            let elements = ((try? xmlDocument.nodes(forXPath: MVRSceneGeometryLoader.geometryObjectsXPath)) ?? [])
+                .compactMap { $0 as? XMLElement }
+            self.elements = elements
+            self.objects = Dictionary(
+                zip(MVRSceneGeometryLoader.objectKeys(elements), elements),
+                uniquingKeysWith: { first, _ in first })
+        }
+
+        /// In document order, for the inventory.
+        private let elements: [XMLElement]
+
+        init?(mvrURL url: URL) {
+            self.init(source: MVRGeometrySource(url: url, sceneXML: nil, meshOverrides: [:]))
+        }
+
+        func inventory() -> GeometryInventory {
+            GeometryInventory.read(xmlDocument, objects: elements)
+        }
+
+        /// Nil for a symbol with no readable meshes.
+        func preview(symdef uuid: String) -> SymbolPreview? {
+            preview(of: resolver.placements(forSymdef: uuid, stack: []))
+        }
+
+        /// An object's geometry in its own space, leaving out where it's
+        /// placed. Nil when it has none that can be read.
+        func preview(object key: String) -> SymbolPreview? {
+            preview(of: placements(ofObject: key))
+        }
+
+        /// Objects where they stand in the scene, all in one, for drawing
+        /// over the whole-scene view to pick them out.
+        func highlight(objects keys: Set<String>) -> SymbolPreview? {
+            var placements: [MeshPlacement] = []
+            for key in keys {
+                guard let element = objects[key] else { continue }
+                let placed = MVRSceneGeometryLoader.transform(from: element) ?? SCNMatrix4Identity
+                placements += placementsOf(element).map {
+                    MeshPlacement(meshKey: $0.meshKey, transform: SCNMatrix4Mult($0.transform, placed))
+                }
+            }
+            return preview(of: placements)
+        }
+
+        /// The mesh files a set of symbols draws, nesting included.
+        func meshKeys(symdefs: Set<String>) -> Set<String> {
+            Set(symdefs.flatMap { resolver.placements(forSymdef: $0, stack: []).map(\.meshKey) })
+        }
+
+        /// The mesh files a set of objects draws, through their symbols
+        /// too.
+        func meshKeys(objects keys: Set<String>) -> Set<String> {
+            Set(keys.flatMap { placements(ofObject: $0).map(\.meshKey) })
+        }
+
+        /// Every object's model fingerprint and material colours, reading
+        /// each mesh file once. Spread over the cores, like a simplify.
+        func traits() -> [String: ObjectTraits] {
+            var ownFiles: [String: [String]] = [:]
+            var symbols: [String: [String]] = [:]
+            var allMeshes: [String: Set<String>] = [:]
+            var keys: Set<String> = []
+            for (key, element) in objects {
+                var own: [String] = []
+                var placed: [String] = []
+                for geometries in element.elements(forName: "Geometries") {
+                    for case let child as XMLElement in geometries.children ?? [] {
+                        if child.name == "Geometry3D", let file = child.attribute(forName: "fileName")?.stringValue {
+                            own.append(file.lowercased())
+                        } else if child.name == "Symbol", let symdef = child.attribute(forName: "symdef")?.stringValue {
+                            placed.append(symdef.lowercased())
+                        }
+                    }
+                }
+                ownFiles[key] = own
+                symbols[key] = placed
+                let meshes = Set(placementsOf(element).map(\.meshKey)).union(own)
+                allMeshes[key] = meshes
+                keys.formUnion(meshes)
+            }
+
+            let files = Array(keys)
+            let source = self.source
+            nonisolated(unsafe) let sharedIndex = index
+            let workerCount = min(max(ProcessInfo.processInfo.activeProcessorCount, 1), 8)
+            var read = [(digest: String, colours: Set<UInt32>)](repeating: ("", []), count: files.count)
+            read.withUnsafeMutableBufferPointer { buffer in
+                nonisolated(unsafe) let slots = buffer
+                DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
+                    guard let archive = try? Archive(url: source.url, accessMode: .read) else { return }
+                    var position = worker
+                    while position < files.count {
+                        defer { position += workerCount }
+                        let file = files[position]
+                        var data = source.meshOverrides[file]
+                        if data == nil, let entry = sharedIndex[file] {
+                            var bytes = Data()
+                            _ = try? archive.extract(entry) { bytes.append($0) }
+                            data = bytes
+                        }
+                        guard let data else { continue }
+                        slots[position] = (
+                            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+                            MeshFile.materialColours(data, fileName: file))
+                    }
+                }
+            }
+            var byFile: [String: (digest: String, colours: Set<UInt32>)] = [:]
+            for (position, file) in files.enumerated() { byFile[file] = read[position] }
+
+            var result: [String: ObjectTraits] = [:]
+            for key in objects.keys {
+                let own = (ownFiles[key] ?? []).map { byFile[$0]?.digest ?? $0 }.sorted()
+                let placed = (symbols[key] ?? []).sorted()
+                let model = own.isEmpty && placed.isEmpty
+                    ? nil
+                    : placed.joined(separator: ",") + "|" + own.joined(separator: ",")
+                let colours = (allMeshes[key] ?? []).reduce(into: Set<UInt32>()) {
+                    $0.formUnion(byFile[$1]?.colours ?? [])
+                }
+                result[key] = ObjectTraits(model: model, colours: colours)
+            }
+            return result
+        }
+
+        /// Triangles across a set of mesh files, each counted once.
+        func triangleCount(meshKeys keys: Set<String>) -> Int {
+            load(keys)
+            return keys.reduce(0) { $0 + (meshes[$1]?.indices.count ?? 0) / 3 }
+        }
+
+        /// Rewrites each mesh file at about `fraction` of its triangles,
+        /// in its own format. Spread over the cores: one real venue has
+        /// over 12,000 meshes.
+        func simplify(meshKeys keys: Set<String>, keeping fraction: Double) -> SimplifyResult {
+            let keys = Array(keys)
+            let source = self.source
+            nonisolated(unsafe) let sharedIndex = index
+            let workerCount = min(max(ProcessInfo.processInfo.activeProcessorCount, 1), 8)
+            var outcomes = [(data: Data?, before: Int, after: Int)](repeating: (nil, 0, 0), count: keys.count)
+
+            outcomes.withUnsafeMutableBufferPointer { buffer in
+                nonisolated(unsafe) let slots = buffer
+                DispatchQueue.concurrentPerform(iterations: workerCount) { worker in
+                    guard let archive = try? Archive(url: source.url, accessMode: .read) else { return }
+                    var position = worker
+                    while position < keys.count {
+                        defer { position += workerCount }
+                        let key = keys[position]
+                        var data = source.meshOverrides[key]
+                        if data == nil, let entry = sharedIndex[key] {
+                            var read = Data()
+                            _ = try? archive.extract(entry) { read.append($0) }
+                            data = read
+                        }
+                        guard let data, let mesh = MeshFile.read(data, fileName: key) else { continue }
+                        let simpler = MeshSimplifier.simplify(mesh, keeping: fraction)
+                        guard simpler.triangleCount < mesh.triangleCount,
+                              let written = MeshFile.write(simpler, fileName: key)
+                        else {
+                            slots[position] = (nil, mesh.triangleCount, mesh.triangleCount)
+                            continue
+                        }
+                        slots[position] = (written, mesh.triangleCount, simpler.triangleCount)
+                    }
+                }
+            }
+
+            var files: [String: Data] = [:]
+            for (position, outcome) in outcomes.enumerated() {
+                if let data = outcome.data { files[keys[position]] = data }
+            }
+            return SimplifyResult(
+                files: files,
+                trianglesBefore: outcomes.reduce(0) { $0 + $1.before },
+                trianglesAfter: outcomes.reduce(0) { $0 + $1.after },
+                meshCount: keys.count)
+        }
+
+        private func placements(ofObject key: String) -> [MeshPlacement] {
+            objects[key].map(placementsOf) ?? []
+        }
+
+        private func placementsOf(_ element: XMLElement) -> [MeshPlacement] {
+            var result: [MeshPlacement] = []
+            for geometries in element.elements(forName: "Geometries") {
+                resolver.collectPlacements(of: geometries, accumulated: SCNMatrix4Identity, into: &result, stack: [])
+            }
+            return result
+        }
+
+        private func load(_ keys: Set<String>) {
+            let needed = keys.filter { meshes[$0] == nil && !unreadable.contains($0) }
+            guard !needed.isEmpty else { return }
+            let parsed = MVRSceneGeometryLoader.parseMeshes(
+                keys: Array(needed), mvrURL: source.url, index: index, overrides: source.meshOverrides)
+            meshes.merge(parsed) { first, _ in first }
+            unreadable.formUnion(needed.filter { parsed[$0] == nil })
+        }
+
+        private func preview(of placements: [MeshPlacement]) -> SymbolPreview? {
+            load(Set(placements.map(\.meshKey)))
+            let chunks = MVRSceneGeometryLoader.mergedNodes(placements: placements, meshes: meshes)
+            guard !chunks.isEmpty else { return nil }
+
+            let root = SCNNode()
+            var low = SCNVector3(CGFloat.infinity, .infinity, .infinity)
+            var high = SCNVector3(-CGFloat.infinity, -.infinity, -.infinity)
+            var triangles = 0
+            for chunk in chunks {
+                root.addChildNode(chunk)
+                let (chunkLow, chunkHigh) = chunk.boundingBox
+                low = SCNVector3(min(low.x, chunkLow.x), min(low.y, chunkLow.y), min(low.z, chunkLow.z))
+                high = SCNVector3(max(high.x, chunkHigh.x), max(high.y, chunkHigh.y), max(high.z, chunkHigh.z))
+                triangles += (chunk.geometry?.elements ?? []).reduce(0) { $0 + $1.primitiveCount }
+            }
+            root.enumerateHierarchy { node, _ in node.castsShadow = false }
+
+            return SymbolPreview(
+                node: root,
+                boundingBox: (low, high),
+                triangleCount: triangles,
+                meshPlacementCount: placements.count,
+                missingMeshCount: placements.filter { meshes[$0.meshKey] == nil }.count)
+        }
     }
 }

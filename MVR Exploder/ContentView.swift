@@ -27,9 +27,9 @@ struct ContentView: View {
                     }
                 case .smartAutoID:
                     SmartAutoIDView(document: document, onBack: backToTools)
-                case .modeSwap:
-                    editing("Mode Swap", tag: "ModeSwap") { draft, close in
-                        ModeSwapView(document: draft, onBack: close)
+                case .modeViewer:
+                    editing("Mode Viewer", tag: "ModeSwap") { draft, close in
+                        ModeViewerView(document: draft, onBack: close)
                     }
                 case .compare:
                     editing("Compare & Merge", tag: "Merge") { draft, close in
@@ -39,6 +39,10 @@ struct ContentView: View {
                     // Makes a CSV and never edits the file, so there's
                     // nothing to apply; it asks before dropping its layout.
                     DisguiseCSVView(document: document, onBack: backToTools)
+                case .geometryInspector:
+                    editing("Geometry Inspector", tag: "Geometry") { draft, close in
+                        GeometryInspectorView(document: draft, onBack: close)
+                    }
                 case .viewer3D:
                     editing("3D Viewer", tag: "Edit") { draft, close in
                         Viewer3DScreen(document: draft, onClose: close)
@@ -107,7 +111,7 @@ struct ContentView: View {
         case .none:
             // Three columns across and their padding.
             return CGSize(width: 900, height: 600)
-        case .singleEdit, .compare, .modeSwap:
+        case .singleEdit, .compare, .modeViewer:
             return CGSize(width: 780, height: 480)
         case .viewer3D:
             return CGSize(width: 820, height: 520)
@@ -118,6 +122,9 @@ struct ContentView: View {
             return CGSize(width: 1120, height: 700)
         case .disguiseCSV:
             return CGSize(width: 900, height: 620)
+        case .geometryInspector:
+            // The list and the render side by side.
+            return CGSize(width: 900, height: 560)
         }
     }
 }
