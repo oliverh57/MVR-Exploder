@@ -38,7 +38,12 @@ enum GDTF3DSParser {
             Float(bitPattern: readUInt32(offset))
         }
 
-        func walk(_ start: Int, _ end: Int) {
+        /// `base` is where the current object's vertices start: each
+        /// object's face list indexes its own vertex list, so faces are
+        /// offset by the vertices read before it. Without that, every object
+        /// after the first drew with the first one's vertices — and real
+        /// scene meshes often carry several (941 of 1,895 in one file).
+        func walk(_ start: Int, _ end: Int, base: Int32) {
             var offset = start
             while offset + 6 <= end {
                 let chunkID = readUInt16(offset)
@@ -48,15 +53,18 @@ enum GDTF3DSParser {
                 let bodyEnd = offset + chunkLength
 
                 switch chunkID {
-                case mainChunk, editor3DChunk, triMeshChunk:
-                    walk(bodyStart, bodyEnd)
+                case mainChunk, editor3DChunk:
+                    walk(bodyStart, bodyEnd, base: base)
+
+                case triMeshChunk:
+                    walk(bodyStart, bodyEnd, base: Int32(vertices.count))
 
                 case namedObjectChunk:
                     // Body starts with a null-terminated object name before
                     // any sub-chunks.
                     var nameEnd = bodyStart
                     while nameEnd < bodyEnd, bytes[nameEnd] != 0 { nameEnd += 1 }
-                    walk(nameEnd + 1, bodyEnd)
+                    walk(nameEnd + 1, bodyEnd, base: base)
 
                 case vertexListChunk:
                     guard bodyStart + 2 <= bodyEnd else { break }
@@ -75,9 +83,9 @@ enum GDTF3DSParser {
                     var cursor = bodyStart + 2
                     for _ in 0..<count {
                         guard cursor + 8 <= bodyEnd else { break }
-                        faceIndices.append(Int32(readUInt16(cursor)))
-                        faceIndices.append(Int32(readUInt16(cursor + 2)))
-                        faceIndices.append(Int32(readUInt16(cursor + 4)))
+                        faceIndices.append(base + Int32(readUInt16(cursor)))
+                        faceIndices.append(base + Int32(readUInt16(cursor + 2)))
+                        faceIndices.append(base + Int32(readUInt16(cursor + 4)))
                         cursor += 8
                     }
 
@@ -88,7 +96,7 @@ enum GDTF3DSParser {
             }
         }
 
-        walk(0, bytes.count)
+        walk(0, bytes.count, base: 0)
         guard !vertices.isEmpty, !faceIndices.isEmpty else { return nil }
         return RawMesh(vertices: vertices, faceIndices: faceIndices)
     }
