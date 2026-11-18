@@ -17,14 +17,14 @@ DEST="/Applications"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Downloading $APP…"
+echo "Downloading ${APP}..."
 curl -fL --progress-bar "$ZIP_URL" -o "$TMP/app.zip"
 ditto -x -k "$TMP/app.zip" "$TMP"
 [[ -d "$TMP/$APP.app" ]] || { echo "The download didn't contain $APP.app." >&2; exit 1; }
 
 running() { pgrep -xq "$APP" || pgrep -xq "$OLD_APP"; }
 if running; then
-  echo "Waiting for $APP to quit…"
+  echo "Waiting for ${APP} to quit..."
   while running; do sleep 1; done
 fi
 
