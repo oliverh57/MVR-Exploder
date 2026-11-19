@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/oliverh57/MVR-Exploder/main/install
 
 It downloads the latest version into Applications and opens it. Run the same command to update.
 
-Requires macOS 15 or later, on Apple silicon or Intel.
+Requires macOS 14.4 or later, on Apple silicon or Intel.
 
 ## Licence
 
